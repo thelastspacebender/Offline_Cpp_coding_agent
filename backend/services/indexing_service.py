@@ -10,6 +10,7 @@ from typing import Dict, Any
 
 from ..core.file_scanner import scan_source_files
 from ..core.encoding_utils import read_file_safe
+from ..core.agent_logger import log_agent_line
 from ..parser.ast_visitor import parse_code
 from ..storage.sqlite_db import DatabaseManager
 from ..storage.fts_index import FtsIndex
@@ -45,6 +46,7 @@ class IndexingService:
 
         # Scan valid C/C++ source files
         source_files = scan_source_files(root_path)
+        log_agent_line(f"[{time.strftime('%H:%M:%S')}] 📁 [Indexer] Найдено исходников: {len(source_files)} в {root_path}")
         total_symbols = 0
         total_calls = 0
 
@@ -97,6 +99,10 @@ class IndexingService:
                     )
 
         duration = time.time() - start_time
+        log_agent_line(
+            f"[{time.strftime('%H:%M:%S')}] ✅ [Indexer] Готово за {duration:.2f}с: "
+            f"{len(source_files)} файлов, {total_symbols} символов, {total_calls} связей."
+        )
 
         return {
             "success": True,

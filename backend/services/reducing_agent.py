@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 from ..core.models import CodeCitation, SearchResult, SymbolDefinition
-from ..core.agent_logger import log_agent_boundary, log_agent_section
+from ..core.agent_logger import log_agent_boundary, log_agent_section, log_agent_line, log_agent_file_only
 from ..storage.sqlite_db import DatabaseManager
 from ..storage.graph_store import GraphStore
 from ..storage.fts_index import FtsIndex
-from .qwen_service import QwenService, safe_print
+from .qwen_service import QwenService
 from .prompt_builder import build_system_prompt, smart_truncate_code
 
 
@@ -524,6 +524,10 @@ class ReducingAgent:
         usr_p = f"USER QUESTION:\n{question}\n\nCODE BATCH:\n{batch_body}\n\nJSON:"
 
         raw = self.qwen.generate_raw(sys_p, usr_p, temperature=0.0, max_tokens=700, timeout=timeout)
+        log_agent_file_only(
+            f"{pass_name.upper()} RAW LLM RESPONSE",
+            f"Files in batch: {', '.join(dict.fromkeys(c.display_path for c in batch))}\n\n{raw or '<empty>'}"
+        )
         parsed = _parse_llm_json(raw)
 
         evidences: List[EvidenceItem] = []
@@ -841,7 +845,7 @@ class ReducingAgent:
 
             rounds_done += 1
             now_r = time.strftime("%H:%M:%S")
-            safe_print(f"[{now_r}] 🗜️ [Pass 4: Reduce раунд {rounds_done}] Объём доказательств {total_chars} симв. > лимит {final_char_budget}. Сжатие...", flush=True)
+            log_agent_line(f"[{now_r}] 🗜️ [Pass 4: Reduce раунд {rounds_done}] Объём доказательств {total_chars} симв. > лимит {final_char_budget}. Сжатие...")
 
             chunks = [
                 CodeChunk(
@@ -998,11 +1002,10 @@ class ReducingAgent:
         batch_char_budget = max(8000, int(n_ctx * 0.60 * 3.0))
         final_char_budget = max(10000, int((n_ctx - 2800) * 2.8))
 
-        safe_print(
+        log_agent_line(
             f"[{time.strftime('%H:%M:%S')}] 🧠 [Reducing {mode_tag}] n_ctx={n_ctx} | "
             f"batch={batch_char_budget} симв. | final_window={final_char_budget} симв. | "
-            f"файлов в индексе: {len(all_files)}",
-            flush=True
+            f"файлов в индексе: {len(all_files)}"
         )
 
         file_encodings: Dict[str, str] = {f["file_path"]: f["encoding"] for f in all_files}
@@ -1015,9 +1018,10 @@ class ReducingAgent:
             base_to_fulls.setdefault(os.path.basename(fp).lower(), []).append(fp)
 
         # ---------------- PASS 0: Priority Ordering Only ----------------
+        log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⏳ [Pass 0] Извлечение ключевых терминов вопроса через LLM...")
         keywords = self._pass0_extract_keywords(question, timeout=budget.batch_timeout(15.0))
         bm25_boost_files = {m["file_path"] for m in self.fts.search_bm25(question, limit=15, custom_tokens=keywords or None)}
-        safe_print(f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова для порядка очереди: {keywords[:10]}", flush=True)
+        log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова для порядка очереди: {keywords[:10]}")
 
         # ---------------- PASS 1: All Headers + Standalone Outlines ----------------
         header_records = [f for f in all_files if os.path.splitext(f["file_path"])[1].lower() in HEADER_EXTS]
@@ -1080,15 +1084,16 @@ class ReducingAgent:
         pass1_evidences: List[EvidenceItem] = []
         pass1_batches_done = 0
 
-        safe_print(
-            f"[{time.strftime('%H:%M:%S')}] 📂 [Pass 1: Заголовки + Standalone] Файлов: {len(pass1_targets) + (len(standalone_sources) if use_outlines_for_sources else 0)}, батчей: {len(pass1_batches)}",
-            flush=True
+        log_agent_line(
+            f"[{time.strftime('%H:%M:%S')}] 📂 [Pass 1: Заголовки + Standalone] Файлов: {len(pass1_targets) + (len(standalone_sources) if use_outlines_for_sources else 0)}, батчей: {len(pass1_batches)}"
         )
 
         for idx, batch in enumerate(pass1_batches, 1):
             if not budget.can_start_batch("pass1", phase_batches_done=pass1_batches_done):
-                safe_print(f"[{time.strftime('%H:%M:%S')}] ⏱️ [Pass 1] Достигнут лимит фазы ({budget.elapsed():.1f}с). Переход к Pass 2.", flush=True)
+                log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⏱️ [Pass 1] Достигнут лимит фазы ({budget.elapsed():.1f}с). Переход к Pass 2.")
                 break
+            preview = ", ".join(list(dict.fromkeys(os.path.basename(c.file_path) for c in batch))[:4])
+            log_agent_line(f"[{time.strftime('%H:%M:%S')}]    ▶ [Pass 1 | {idx}/{len(pass1_batches)}] Анализ батча ({preview})...")
             t0 = time.time()
             evs, _ = self._scan_batch_map(
                 batch, question, "pass1_headers", False,
@@ -1098,9 +1103,8 @@ class ReducingAgent:
             budget.record_batch(dt)
             pass1_batches_done += 1
             pass1_evidences.extend(evs)
-            safe_print(
-                f"[{time.strftime('%H:%M:%S')}]    • [Pass 1 | {idx}/{len(pass1_batches)} | {dt:.1f}с] найдено блоков: {len(evs)}",
-                flush=True
+            log_agent_line(
+                f"[{time.strftime('%H:%M:%S')}]    ✓ [Pass 1 | {idx}/{len(pass1_batches)} | {dt:.1f}с] найдено блоков: {len(evs)}"
             )
 
         # ---------------- PASS 2: Map Headers -> .cpp/.c ----------------
@@ -1122,15 +1126,16 @@ class ReducingAgent:
         missing_symbols: Set[str] = set()
         pass2_batches_done = 0
 
-        safe_print(
-            f"[{time.strftime('%H:%M:%S')}] 📄 [Pass 2: Реализации .cpp/.c] Отобрано файлов: {len(pass2_targets)}, батчей: {len(pass2_batches)}",
-            flush=True
+        log_agent_line(
+            f"[{time.strftime('%H:%M:%S')}] 📄 [Pass 2: Реализации .cpp/.c] Отобрано файлов: {len(pass2_targets)}, батчей: {len(pass2_batches)}"
         )
 
         for idx, batch in enumerate(pass2_batches, 1):
             if not budget.can_start_batch("pass2", phase_batches_done=pass2_batches_done):
-                safe_print(f"[{time.strftime('%H:%M:%S')}] ⏱️ [Pass 2] Достигнут лимит фазы ({budget.elapsed():.1f}с). Переход к Pass 3 Rescue.", flush=True)
+                log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⏱️ [Pass 2] Достигнут лимит фазы ({budget.elapsed():.1f}с). Переход к Pass 3 Rescue.")
                 break
+            preview = ", ".join(list(dict.fromkeys(os.path.basename(c.file_path) for c in batch))[:4])
+            log_agent_line(f"[{time.strftime('%H:%M:%S')}]    ▶ [Pass 2 | {idx}/{len(pass2_batches)}] Анализ батча ({preview})...")
             t0 = time.time()
             evs, miss = self._scan_batch_map(
                 batch, question, "pass2_cpp", True,
@@ -1141,9 +1146,8 @@ class ReducingAgent:
             pass2_batches_done += 1
             pass2_evidences.extend(evs)
             missing_symbols.update(miss)
-            safe_print(
-                f"[{time.strftime('%H:%M:%S')}]    • [Pass 2 | {idx}/{len(pass2_batches)} | {dt:.1f}с] найдено: {len(evs)}, внешних символов: {len(miss)}",
-                flush=True
+            log_agent_line(
+                f"[{time.strftime('%H:%M:%S')}]    ✓ [Pass 2 | {idx}/{len(pass2_batches)} | {dt:.1f}с] найдено: {len(evs)}, внешних символов: {len(miss)}"
             )
 
         # ---------------- PASS 3: Rescue Skipped Files ----------------
@@ -1172,15 +1176,16 @@ class ReducingAgent:
                 ))
 
             rescue_batches = self._pack_chunks_into_batches(rescue_chunks, batch_char_budget)
-            safe_print(
-                f"[{time.strftime('%H:%M:%S')}] 🛟 [Pass 3: Rescue отсеянных] Файлов: {len(rescue_targets)}, батчей: {len(rescue_batches)}",
-                flush=True
+            log_agent_line(
+                f"[{time.strftime('%H:%M:%S')}] 🛟 [Pass 3: Rescue отсеянных] Файлов: {len(rescue_targets)}, батчей: {len(rescue_batches)}"
             )
 
             pass3_new_missing: Set[str] = set()
             for idx, batch in enumerate(rescue_batches, 1):
                 if not budget.can_start_batch("pass3", phase_batches_done=pass3_batches_done):
                     break
+                preview = ", ".join(list(dict.fromkeys(os.path.basename(c.file_path) for c in batch))[:4])
+                log_agent_line(f"[{time.strftime('%H:%M:%S')}]    ▶ [Pass 3 | {idx}/{len(rescue_batches)}] Досканирование ({preview})...")
                 t0 = time.time()
                 evs, miss = self._scan_batch_map(
                     batch, question, "pass3_rescue", deep,
@@ -1191,9 +1196,8 @@ class ReducingAgent:
                 pass3_batches_done += 1
                 pass3_evidences.extend(evs)
                 pass3_new_missing.update(miss)
-                safe_print(
-                    f"[{time.strftime('%H:%M:%S')}]    • [Pass 3 | {idx}/{len(rescue_batches)} | {dt:.1f}с] спасено блоков: {len(evs)}",
-                    flush=True
+                log_agent_line(
+                    f"[{time.strftime('%H:%M:%S')}]    ✓ [Pass 3 | {idx}/{len(rescue_batches)} | {dt:.1f}с] спасено блоков: {len(evs)}"
                 )
 
             # Deep Mode Hop 2
@@ -1211,9 +1215,8 @@ class ReducingAgent:
                             fp, self._make_display_path(fp), rec["encoding"], max_lines=320, overlap=15
                         ))
                     hop2_batches = self._pack_chunks_into_batches(hop2_chunks, batch_char_budget)
-                    safe_print(
-                        f"[{time.strftime('%H:%M:%S')}] 🛟 [Pass 3b: Deep Rescue Hop 2] Файлов: {len(hop2_targets)}, батчей: {len(hop2_batches)}",
-                        flush=True
+                    log_agent_line(
+                        f"[{time.strftime('%H:%M:%S')}] 🛟 [Pass 3b: Deep Rescue Hop 2] Файлов: {len(hop2_targets)}, батчей: {len(hop2_batches)}"
                     )
                     for idx, batch in enumerate(hop2_batches, 1):
                         if not budget.can_start_batch("pass3", phase_batches_done=pass3_batches_done):
@@ -1223,14 +1226,18 @@ class ReducingAgent:
                             batch, question, "pass3_rescue", False,
                             budget.batch_timeout(45.0), display_to_full, base_to_fulls
                         )
-                        budget.record_batch(time.time() - t0)
+                        dt = time.time() - t0
+                        budget.record_batch(dt)
                         pass3_batches_done += 1
                         pass3_evidences.extend(evs)
+                        log_agent_line(
+                            f"[{time.strftime('%H:%M:%S')}]    ✓ [Pass 3b | {idx}/{len(hop2_batches)} | {dt:.1f}с] спасено блоков: {len(evs)}"
+                        )
 
         # Combine all evidence; fallback to BM25 snippets only if zero chunks matched
         all_evidences = pass1_evidences + pass2_evidences + pass3_evidences
         if not all_evidences:
-            safe_print(f"[{time.strftime('%H:%M:%S')}] ⚠️ [Reducing] Карты дали 0 совпадений, резервный подбор через BM25.", flush=True)
+            log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⚠️ [Reducing] Карты дали 0 совпадений, резервный подбор через BM25.")
             for sn in self.fts.search_bm25(question, limit=10, custom_tokens=keywords or None):
                 fp = sn["file_path"]
                 all_evidences.append(EvidenceItem(
