@@ -366,6 +366,41 @@ class TestSemanticMapAndFunnel(unittest.TestCase):
         locs = [(c.file, c.line) for c in res.citations]
         self.assertEqual(len(locs), len(set(locs)), "Duplicate (file, line) FTS5 hits should be deduplicated")
 
+    def test_explicit_file_line_range_and_noisy_helper_skip(self):
+        # Large file where target lines 55-64 are explicitly requested in question
+        lines = [f"// line {i}\n" for i in range(1, 55)]
+        lines.append("int CHardware::CheckRange(int mode) {\n")
+        lines.append("    GetProp(123);\n")
+        lines.append("    RealDriverHelper(mode);\n")
+        lines.append("    if (mode == 1) return TARGET_MARKER_57;\n")
+        lines.append("    return 0;\n")
+        lines.append("}\n")
+        lines.extend([f"// tail {i}\n" for i in range(61, 120)])
+        self._write("Hardware.cpp", "".join(lines))
+        # Noisy GetProp + real helper in another file (Stage 1 doesn't pick Props.cpp)
+        self._write("Props.cpp", (
+            "int CProps::GetProp(int id) {\n"
+            + "".join(f"    if (id == {i}) return {i};\n" for i in range(1, 20))
+            + "    return -1;\n}\n"
+            "int RealDriverHelper(int m) {\n"
+            "    return HELPER_MARKER_OK + m;\n"
+            "}\n"
+        ))
+
+        db = DatabaseManager(self.db_path)
+        IndexingService(db).index_directory(self.src_dir)
+        qwen = MockFunnelQwen()
+        svc = SearchService(db, qwen)
+        svc.map_builder.build_sync()
+        qwen.raw_calls.clear()
+
+        res = svc.query("Покажи код в Hardware.cpp вокруг строк 55-64", mode="funnel", language="ru")
+        self.assertTrue(res.success)
+        final_usr = qwen.final_prompts[0]["usr"]
+        self.assertIn("TARGET_MARKER_57", final_usr, "Explicit file:line range must be loaded in Stage 3")
+        self.assertIn("HELPER_MARKER_OK", final_usr, "Real called helper must be rescued in Stage 3")
+        self.assertNotIn("CProps::GetProp", final_usr, "Noisy boilerplate GetProp must not waste Stage 3 rescue budget")
+
 
 if __name__ == "__main__":
     unittest.main()

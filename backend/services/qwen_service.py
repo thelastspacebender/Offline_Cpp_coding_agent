@@ -86,6 +86,7 @@ class QwenService:
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "repeat_penalty": 1.08,
             "stream": False
         }
         if stop:
@@ -212,6 +213,7 @@ class QwenService:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": safe_max_tokens,
+            "repeat_penalty": 1.15,
             "stream": False
         }
 

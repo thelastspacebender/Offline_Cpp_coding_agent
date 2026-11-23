@@ -45,9 +45,20 @@ from .reducing_agent import (
 )
 
 
-MAP_BATCH_MAX_LINES = 180
-MAP_BATCH_MAX_CHARS = 9500
+MAP_BATCH_MAX_LINES = 240
+MAP_BATCH_MAX_CHARS = 13000
 SKELETON_BATCH_MAX_CHARS = 9500
+MAX_SKELETON_PER_FILE = 30
+NOISY_RESCUE_HELPERS = {
+    "getprop", "setprop", "enterlog", "selectflow", "getstatusbit", "setstatusbit",
+    "reversefloat", "updatedata", "getdlgitem", "enablewindow", "showwindow",
+    "setcursel", "getcursel", "addstring", "resetcontent", "format", "loadstring",
+}
+FILE_MENTION_RE = re.compile(
+    r'([A-Za-z0-9_.\-\\/]+\.(?:cpp|c|cc|cxx|h|hpp|hxx|hh|inl))'
+    r'(?:\s*(?::|вокруг\s+строк|lines?|строк[аи]?)\s*(\d+)(?:\s*[-–—]\s*(\d+))?)?',
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -196,26 +207,32 @@ class SemanticFunnelAgent:
             if fp not in file_roles:
                 file_roles[fp] = entry["role_tag"]
 
-        # Context window sizing
+        # Context window sizing: keep Stage 4 prompt focused (~4.5k tokens max on 16k ctx)
+        # so small local models stay fast and avoid attention drift / repetition loops.
         n_ctx = self.qwen.get_context_size()
-        final_char_budget = max(9000, min(32000, int((n_ctx - 4500) * 2.4)))
+        final_char_budget = max(8500, min(18500, int((n_ctx - 4500) * 1.5)))
 
         excluded_stems = ReducingAgent._extract_exclusions(question)
         q_idents = ReducingAgent._extract_question_identifiers(question, excluded_stems)
+        pinned_files, explicit_slices = self._extract_explicit_file_requests(
+            question, excluded_stems, display_to_full, base_to_fulls
+        )
 
         log_agent_line(
             f"[{time.strftime('%H:%M:%S')}] 🗺️ [Smart Funnel] Старт ({mode_tag}) | "
             f"n_ctx={n_ctx} | Строк карты: {len(map_entries)} | "
-            f"Идентификаторы: {q_idents[:6] or 'нет'} | Исключения: {sorted(excluded_stems) or 'нет'}"
+            f"Идентификаторы: {q_idents[:6] or 'нет'} | Закрепл. файлы: {[os.path.basename(f) for f in pinned_files] or 'нет'} | "
+            f"Исключения: {sorted(excluded_stems) or 'нет'}"
         )
 
         # ---------------- STAGE 1: Map Triage + SQLite Insurance ----------------
-        max_target_files = 20 if deep else 14
+        max_target_files = 14 if deep else 10
         selected_files, stage1_batches_done, stage1_reasons = self._stage1_select_files(
             question=question,
             map_entries=map_entries,
             q_idents=q_idents,
             excluded_stems=excluded_stems,
+            pinned_files=pinned_files,
             display_to_full=display_to_full,
             base_to_fulls=base_to_fulls,
             file_roles=file_roles,
@@ -229,11 +246,12 @@ class SemanticFunnelAgent:
         )
 
         # ---------------- STAGE 2: AST Method Skeleton Selection ----------------
-        max_methods = 24 if deep else 16
+        max_methods = 20 if deep else 14
         selected_items, extra_symbols, total_skeleton_items = self._stage2_select_methods(
             question=question,
             selected_files=selected_files,
             q_idents=q_idents,
+            pinned_files=pinned_files,
             file_roles=file_roles,
             file_line_counts=file_line_counts,
             max_methods=max_methods,
@@ -245,11 +263,13 @@ class SemanticFunnelAgent:
         )
 
         # ---------------- STAGE 3: Raw Bodies + Call-Graph Rescue ----------------
-        max_rescue = 12 if deep else 8
+        max_rescue = 10 if deep else 6
         raw_blocks, rescued_count = self._stage3_load_and_rescue(
             selected_items=selected_items,
             extra_symbols=extra_symbols,
             q_idents=q_idents,
+            pinned_files=pinned_files,
+            explicit_slices=explicit_slices,
             excluded_stems=excluded_stems,
             file_encodings=file_encodings,
             file_roles=file_roles,
@@ -268,9 +288,9 @@ class SemanticFunnelAgent:
             "\n\nSTRICT ANTI-HALLUCINATION RULE:\n"
             "- Base your answer EXCLUSIVELY on the exact raw code blocks provided below.\n"
             "- Never fabricate, guess, or reconstruct a function's implementation body from a call site.\n"
-            "- If a function is called in the provided code (e.g. `obj->Foo()`) but its implementation body "
-            "is NOT present in the provided blocks, explicitly state that only the call site is shown and the "
-            "implementation body is not in the retrieved context.\n"
+            "- NEVER use `// ...` or invent unshown lines if a requested file/line range is absent from the context; "
+            "instead, explicitly state in the first sentence which requested file/range is NOT in the retrieved blocks.\n"
+            "- NEVER repeat the same function or code block multiple times.\n"
             "- Every file, class, method, and line number MUST match the numbered lines in the provided blocks."
         )
 
@@ -323,7 +343,7 @@ class SemanticFunnelAgent:
             user_prompt=final_user_prompt,
             raw_user_question=question,
             temperature=0.15,
-            max_tokens=3072,
+            max_tokens=2048,
             use_history=False,
         )
         log_agent_section("SMART FUNNEL STAGE 4: ФИНАЛЬНЫЙ ОТВЕТ QWEN", ai_answer)
@@ -376,6 +396,44 @@ class SemanticFunnelAgent:
             success=True,
         )
 
+    def _extract_explicit_file_requests(
+        self,
+        question: str,
+        excluded_stems: Set[str],
+        display_to_full: Dict[str, str],
+        base_to_fulls: Dict[str, List[str]],
+    ) -> Tuple[List[str], List[Tuple[str, int, int]]]:
+        """Extracts explicitly named source files and optional line ranges from the user question."""
+        pinned_files: List[str] = []
+        explicit_slices: List[Tuple[str, int, int]] = []
+        seen_files: Set[str] = set()
+
+        for m in FILE_MENTION_RE.finditer(question):
+            f_ref = m.group(1)
+            resolved = self._resolve_file_ref(f_ref, display_to_full, base_to_fulls)
+            if not resolved:
+                continue
+            stem_low = os.path.splitext(os.path.basename(resolved))[0].lower()
+            if stem_low in excluded_stems:
+                continue
+            if resolved not in seen_files:
+                seen_files.add(resolved)
+                pinned_files.append(resolved)
+
+            if m.group(2):
+                l1 = int(m.group(2))
+                l2 = int(m.group(3)) if m.group(3) else (l1 + 60)
+                if l1 > l2:
+                    l1, l2 = l2, l1
+                if not m.group(3):
+                    l1 = max(1, l1 - 20)
+                # Cap individual explicit slice to 280 lines so other files still fit
+                if l2 - l1 > 280:
+                    l2 = l1 + 280
+                explicit_slices.append((resolved, l1, l2))
+
+        return pinned_files, explicit_slices
+
     # ------------------------------------------------------------------
     # Stage 1: Semantic Map Triage + Parallel SQLite Insurance
     # ------------------------------------------------------------------
@@ -385,19 +443,33 @@ class SemanticFunnelAgent:
         map_entries: List[Dict[str, Any]],
         q_idents: List[str],
         excluded_stems: Set[str],
+        pinned_files: List[str],
         display_to_full: Dict[str, str],
         base_to_fulls: Dict[str, List[str]],
         file_roles: Dict[str, str],
         current_file: Optional[str],
-        max_files: int = 14,
+        max_files: int = 10,
     ) -> Tuple[List[str], int, Dict[str, str]]:
-        # Filter out user-excluded files before sending to LLM
+        q_low = question.lower()
+        allow_sdk_in_triage = any(k in q_low for k in ("sdk", "vendor", "macro", "generated", "resource.h", "pthread"))
+        pinned_set = set(pinned_files)
+
+        # Filter out user-excluded files and noise ([SDK]/[GENERATED]) from LLM map batches
+        # (SQLite Stage 1B insurance still covers ALL indexed files for exact identifiers!)
         filtered_entries = [
             e for e in map_entries
             if os.path.splitext(os.path.basename(e["file_path"]))[0].lower() not in excluded_stems
+            and (
+                allow_sdk_in_triage
+                or e["file_path"] in pinned_set
+                or e["role_tag"] not in ("sdk", "generated")
+            )
         ]
         if not filtered_entries:
-            filtered_entries = map_entries
+            filtered_entries = [
+                e for e in map_entries
+                if os.path.splitext(os.path.basename(e["file_path"]))[0].lower() not in excluded_stems
+            ] or map_entries
 
         # Pack formatted map lines into ~3k-token batches (<=180 lines or <=9500 chars)
         batches: List[List[Dict[str, Any]]] = []
@@ -505,7 +577,13 @@ class SemanticFunnelAgent:
                 seen.add(fp)
                 selected.append(fp)
 
-        # 1. Top LLM picks
+        # 1. Pin files explicitly named in the user's question first
+        for fp in pinned_files:
+            _add(fp)
+            if fp not in reasons_map:
+                reasons_map[fp] = "Explicitly mentioned in user question"
+
+        # 2. Top LLM picks
         for _, fp, _ in llm_picks:
             _add(fp)
             # If LLM picked a header (.h), automatically pair its matching .cpp/.c implementation
@@ -516,13 +594,16 @@ class SemanticFunnelAgent:
                     for cand in base_to_fulls.get(stem + s_ext, []):
                         _add(cand)
 
-        # 2. Always blend in SQLite insurance hits (guarantees exact identifiers are never missed)
+        # 3. Always blend in SQLite insurance hits (guarantees exact identifiers are never missed)
         for fp in sqlite_insurance:
             if fp not in seen:
-                if len(selected) >= max_files and len(selected) > 4:
-                    # Reserve up to 3 slots for exact SQLite insurance matches if pool is full
-                    selected[-1] = fp
-                    seen.add(fp)
+                if len(selected) >= max_files and len(selected) > len(pinned_files) + 2:
+                    # Replace lowest-ranked non-pinned slot with exact SQLite match
+                    for rev_i in range(len(selected) - 1, -1, -1):
+                        if selected[rev_i] not in pinned_set:
+                            selected[rev_i] = fp
+                            seen.add(fp)
+                            break
                 else:
                     _add(fp)
 
@@ -571,8 +652,15 @@ class SemanticFunnelAgent:
                     fp = r[0]
                     scores[fp] = scores.get(fp, 0) + 3
 
-        # FTS5 BM25 hits
-        bm25_hits = self.fts.search_bm25(question, limit=10, custom_tokens=q_idents or None)
+        # FTS5 BM25 hits (avoid bare file extensions like 'cpp' or line numbers polluting results)
+        ext_noise = {"cpp", "hpp", "hxx", "inl", "cxx", "cc"}
+        bm25_tokens = list(q_idents)
+        if not bm25_tokens:
+            for tok in re.findall(r'[A-Za-z_][A-Za-z0-9_]{2,}', question):
+                low = tok.lower()
+                if low not in ext_noise and low not in GENERIC_NOISE_WORDS and low not in excluded_stems:
+                    bm25_tokens.append(tok)
+        bm25_hits = self.fts.search_bm25(question, limit=10, custom_tokens=bm25_tokens) if bm25_tokens else []
         for h in bm25_hits:
             fp = h["file_path"]
             scores[fp] = scores.get(fp, 0) + 2
@@ -600,10 +688,13 @@ class SemanticFunnelAgent:
         q_idents: List[str],
         file_roles: Dict[str, str],
         file_line_counts: Dict[str, int],
-        max_methods: int = 16,
+        max_methods: int = 14,
+        pinned_files: Optional[List[str]] = None,
     ) -> Tuple[List[SkeletonItem], List[str], int]:
         skeleton: List[SkeletonItem] = []
         item_counter = 1
+        q_lows = [q.lower() for q in q_idents]
+        pinned_set = set(pinned_files or [])
 
         with self.db.get_connection() as conn:
             cur = conn.cursor()
@@ -631,6 +722,7 @@ class SemanticFunnelAgent:
                 call_rows = cur.fetchall()
 
                 if sym_rows:
+                    file_items: List[Tuple[int, SkeletonItem]] = []
                     for sr in sym_rows:
                         ls = int(sr["line_start"] or 1)
                         le = int(sr["line_end"] or ls)
@@ -646,7 +738,23 @@ class SemanticFunnelAgent:
                                 if cn and cn not in CPP_CONTROL_WORDS and cn not in m_calls:
                                     m_calls.append(cn)
 
-                        skeleton.append(SkeletonItem(
+                        name_low = sym_name.lower()
+                        short_low = name_low.split("::")[-1]
+                        calls_low = " ".join(m_calls).lower()
+                        q_match = any(ql in name_low or ql in calls_low or ql in sig.lower() for ql in q_lows)
+                        is_noisy = short_low in NOISY_RESCUE_HELPERS and not q_match
+                        is_dtor = "~" in sym_name
+
+                        # Relevance score per file so giant classes keep only the top 30 methods in Stage 2
+                        rel_score = (
+                            (100 if q_match else 0)
+                            + (20 if sr["kind"] in ("function", "method") else 0)
+                            - (50 if is_noisy else 0)
+                            - (30 if is_dtor else 0)
+                            + min(25, max(0, le - ls) // 4)
+                        )
+
+                        item_obj = SkeletonItem(
                             item_id=f"M{item_counter}",
                             file_path=fp,
                             display_path=disp,
@@ -655,10 +763,19 @@ class SemanticFunnelAgent:
                             line_start=ls,
                             line_end=max(ls, le),
                             signature=sig,
-                            calls=m_calls[:12],
+                            calls=m_calls[:10],
                             role_tag=role,
-                        ))
+                        )
+                        file_items.append((rel_score, item_obj))
                         item_counter += 1
+
+                    if len(file_items) > MAX_SKELETON_PER_FILE:
+                        file_items.sort(key=lambda pair: pair[0], reverse=True)
+                        file_items = file_items[:MAX_SKELETON_PER_FILE]
+                        file_items.sort(key=lambda pair: pair[1].line_start)
+
+                    for _, it in file_items:
+                        skeleton.append(it)
                 else:
                     # File has no parsed functions/classes (e.g. header constants or plain C block)
                     skeleton.append(SkeletonItem(
@@ -678,12 +795,12 @@ class SemanticFunnelAgent:
         if not skeleton:
             return [], [], 0
 
-        # If skeleton is already small (<= max_methods), we can still ask LLM or load all directly!
+        # If skeleton is already small (<= max_methods), load directly without spending an LLM call
         if len(skeleton) <= min(8, max_methods):
             extra_syms: List[str] = []
             for it in skeleton:
                 for c in it.calls:
-                    if c not in extra_syms:
+                    if c not in extra_syms and c.lower() not in NOISY_RESCUE_HELPERS:
                         extra_syms.append(c)
             return skeleton, extra_syms[:10], len(skeleton)
 
@@ -718,11 +835,12 @@ class SemanticFunnelAgent:
         if cur_parts:
             batches.append("\n\n".join(cur_parts))
 
+        per_batch_limit = max(6, max_methods // max(1, len(batches)) + 2)
         sys_p = (
             "You are a C/C++ code analyst performing Stage 2 method selection.\n"
             "Below is an AST skeleton of functions/methods/classes and their outgoing calls.\n"
-            f"Select up to {max_methods} item IDs (e.g. \"M1\", \"M4\") whose full raw source code MUST be inspected "
-            "to answer the user's question accurately.\n"
+            f"Select up to {per_batch_limit} item IDs (e.g. \"M1\", \"M4\") from this batch whose full raw source code MUST be inspected "
+            "to answer the user's question accurately (skip generic property getters unless asked).\n"
             "Also list in \"extra_symbols\" any external functions seen in `calls: [...]` or the question "
             "whose implementations are NOT in the skeleton above and should be fetched.\n"
             "Respond ONLY with valid JSON:\n"
@@ -730,7 +848,7 @@ class SemanticFunnelAgent:
         )
 
         id_to_item = {it.item_id.upper(): it for it in skeleton}
-        picked_ids: List[str] = []
+        per_batch_picks: List[List[str]] = []
         extra_symbols: List[str] = []
 
         for b_idx, skel_text in enumerate(batches, 1):
@@ -744,47 +862,89 @@ class SemanticFunnelAgent:
             )
 
             parsed = _parse_llm_json(raw)
+            batch_ids: List[str] = []
             sel_raw = parsed.get("selected") or parsed.get("methods") or []
             if isinstance(sel_raw, list):
                 for sid in sel_raw:
                     key = str(sid).strip().upper()
-                    if key in id_to_item and key not in picked_ids:
-                        picked_ids.append(key)
+                    if key in id_to_item and key not in batch_ids:
+                        batch_ids.append(key)
 
             # Regex fallback in case JSON was slightly malformed
-            if not picked_ids and raw:
+            if not batch_ids and raw:
                 for m in re.finditer(r'\b(M\d+)\b', raw):
                     key = m.group(1).upper()
-                    if key in id_to_item and key not in picked_ids:
-                        picked_ids.append(key)
+                    if key in id_to_item and key not in batch_ids:
+                        batch_ids.append(key)
+
+            per_batch_picks.append(batch_ids)
 
             ext_raw = parsed.get("extra_symbols") or parsed.get("missing_symbols") or []
             if isinstance(ext_raw, list):
                 for es in ext_raw:
                     s = str(es).strip()
-                    if len(s) >= 3 and s not in extra_symbols:
+                    if len(s) >= 3 and s.lower() not in NOISY_RESCUE_HELPERS and s not in extra_symbols:
                         extra_symbols.append(s)
 
             log_agent_line(
                 f"[{time.strftime('%H:%M:%S')}]    ✓ [Stage 2 | батч {b_idx}/{len(batches)} | {bdt:.1f}с] "
-                f"выбрано ID: {len(picked_ids)}"
+                f"выбрано ID: {len(batch_ids)}"
             )
+
+        # Interleave picks across ALL Stage 2 batches so Batch 1 never starves later batches
+        picked_ids: List[str] = []
+        per_file_counts: Dict[str, int] = {}
+        max_per_file = 5 if len(by_file) <= 3 else 4
+        max_len = max((len(bp) for bp in per_batch_picks), default=0)
+        for pos in range(max_len):
+            for bp in per_batch_picks:
+                if pos < len(bp):
+                    k = bp[pos]
+                    it = id_to_item[k]
+                    if k not in picked_ids and per_file_counts.get(it.file_path, 0) < max_per_file:
+                        picked_ids.append(k)
+                        per_file_counts[it.file_path] = per_file_counts.get(it.file_path, 0) + 1
+                        if len(picked_ids) >= max_methods:
+                            break
+            if len(picked_ids) >= max_methods:
+                break
 
         selected_items = [id_to_item[k] for k in picked_ids[:max_methods]]
 
-        # Always guarantee exact question identifier definitions present in skeleton are included
-        q_lows = [q.lower() for q in q_idents]
+        # Always guarantee exact question identifier / pinned-file definitions present in skeleton are included
         selected_set = {it.item_id for it in selected_items}
+        must_include: List[SkeletonItem] = []
         for it in skeleton:
             if it.item_id in selected_set:
                 continue
             name_low = it.name.lower()
             calls_low = " ".join(it.calls).lower()
             if any(ql in name_low or ql in calls_low for ql in q_lows):
+                must_include.append(it)
+            elif it.file_path in pinned_set and any(ql in it.signature.lower() for ql in q_lows):
+                must_include.append(it)
+
+        for it in must_include:
+            if it.item_id in selected_set:
+                continue
+            if len(selected_items) >= max_methods:
+                # Displace lowest-ranked non-q_ident item from the tail
+                replaced = False
+                for rev_idx in range(len(selected_items) - 1, -1, -1):
+                    cand = selected_items[rev_idx]
+                    c_name = cand.name.lower()
+                    c_calls = " ".join(cand.calls).lower()
+                    if not any(ql in c_name or ql in c_calls for ql in q_lows):
+                        selected_set.discard(cand.item_id)
+                        selected_items[rev_idx] = it
+                        selected_set.add(it.item_id)
+                        replaced = True
+                        break
+                if not replaced:
+                    break
+            else:
                 selected_items.append(it)
                 selected_set.add(it.item_id)
-                if len(selected_items) >= max_methods:
-                    break
 
         # Fallback if LLM picked nothing: select top non-destructor methods
         if not selected_items:
@@ -813,22 +973,61 @@ class SemanticFunnelAgent:
         file_roles: Dict[str, str],
         max_rescue: int,
         final_char_budget: int,
+        pinned_files: Optional[List[str]] = None,
+        explicit_slices: Optional[List[Tuple[str, int, int]]] = None,
     ) -> Tuple[List[RawCodeBlock], int]:
         blocks: List[RawCodeBlock] = []
         loaded_symbol_names: Set[str] = set()
         loaded_spans: Set[Tuple[str, int, int]] = set()
         called_in_raw: Set[str] = set()
+        pinned_set = set(pinned_files or [])
+        q_ident_shorts = {q.split("::")[-1].lower() for q in q_idents}
+
+        # 0. Load any explicitly requested file:line ranges first at top priority
+        for fp, ls, le in (explicit_slices or []):
+            enc = file_encodings.get(fp, "utf-8")
+            code = self._format_numbered_slice(fp, ls, le, enc)
+            if not code:
+                continue
+            blocks.append(RawCodeBlock(
+                file_path=fp,
+                display_path=_make_display_path(fp),
+                line_start=ls,
+                line_end=le,
+                symbols=[f"{os.path.basename(fp)}:{ls}-{le}"],
+                source_tag="explicit_slice",
+                role_tag=file_roles.get(fp, "core"),
+                priority=0,
+                code=code,
+            ))
+            loaded_spans.add((fp, ls, le))
+            for m in CALL_TOKEN_RE.finditer(code):
+                tok = m.group(1)
+                if (
+                    tok not in CPP_CONTROL_WORDS
+                    and tok.lower() not in GENERIC_NOISE_WORDS
+                    and tok.lower() not in NOISY_RESCUE_HELPERS
+                    and len(tok) >= 3
+                ):
+                    called_in_raw.add(tok)
 
         # 1. Load full raw numbered bodies for all Stage 2 selected items
         for it in selected_items:
             enc = file_encodings.get(it.file_path, "utf-8")
             ls = max(1, it.line_start - 2)
             le = it.line_end + 2
+            if self._overlaps_loaded(it.file_path, ls, le, loaded_spans):
+                loaded_symbol_names.add(it.name)
+                loaded_symbol_names.add(it.name.split("::")[-1])
+                continue
             code = self._format_numbered_slice(it.file_path, ls, le, enc)
             if not code:
                 continue
 
-            q_hit = any(qi.lower() in it.name.lower() or qi.lower() in code.lower() for qi in q_idents)
+            q_hit = (
+                it.file_path in pinned_set
+                or any(qi.lower() in it.name.lower() or qi.lower() in code.lower() for qi in q_idents)
+            )
             blocks.append(RawCodeBlock(
                 file_path=it.file_path,
                 display_path=it.display_path,
@@ -847,7 +1046,12 @@ class SemanticFunnelAgent:
             # Extract called identifiers directly from raw C++ body
             for m in CALL_TOKEN_RE.finditer(code):
                 tok = m.group(1)
-                if tok not in CPP_CONTROL_WORDS and tok.lower() not in GENERIC_NOISE_WORDS and len(tok) >= 3:
+                if (
+                    tok not in CPP_CONTROL_WORDS
+                    and tok.lower() not in GENERIC_NOISE_WORDS
+                    and tok.lower() not in NOISY_RESCUE_HELPERS
+                    and len(tok) >= 3
+                ):
                     called_in_raw.add(tok)
 
         # 2. Call-Graph Rescue: fetch missing implementations (%::MethodName) and working callers!
@@ -855,6 +1059,8 @@ class SemanticFunnelAgent:
         for sym in list(q_idents) + list(extra_symbols) + sorted(called_in_raw):
             short = sym.split("::")[-1]
             if len(short) < 3 or short in CPP_CONTROL_WORDS or short.lower() in GENERIC_NOISE_WORDS:
+                continue
+            if short.lower() in NOISY_RESCUE_HELPERS and short.lower() not in q_ident_shorts:
                 continue
             if sym not in rescue_candidates:
                 rescue_candidates.append(sym)
@@ -907,7 +1113,7 @@ class SemanticFunnelAgent:
                         symbols=[r["name"]],
                         source_tag="rescue_callee",
                         role_tag=role,
-                        priority=0 if sym in q_idents else 2,
+                        priority=0 if (sym in q_idents or fp in pinned_set) else 2,
                         code=code,
                     ))
                     loaded_spans.add((fp, ls, le))
@@ -1015,13 +1221,26 @@ class SemanticFunnelAgent:
 
     @staticmethod
     def _fit_blocks_to_budget(blocks: List[RawCodeBlock], char_budget: int) -> List[RawCodeBlock]:
-        """Ensures total raw code fits comfortably inside the active LLM context window."""
+        """
+        Ensures total raw code fits comfortably inside the active LLM context window
+        while guaranteeing every selected file gets fair representation before any file takes extra slots.
+        """
+        per_block_cap = 3600
+        # Order blocks in round-robin passes per file (pass 0 = top block of each file, pass 1 = 2nd, etc.)
+        by_file_idx: Dict[str, int] = {}
+        staged: List[Tuple[int, int, RawCodeBlock]] = []
+        for orig_idx, blk in enumerate(blocks):
+            f_slot = by_file_idx.get(blk.file_path, 0)
+            by_file_idx[blk.file_path] = f_slot + 1
+            # Priority 0 blocks stay front-loaded; beyond 1st block of a file yields to other files first
+            round_tier = 0 if (blk.priority == 0 and f_slot == 0) else (1 if f_slot == 0 else f_slot + 1)
+            staged.append((round_tier, orig_idx, blk))
+
+        staged.sort(key=lambda t: (t[0], t[1]))
+
         fitted: List[RawCodeBlock] = []
         used = 0
-        # Cap any single massive function to at most 35% of budget so other methods remain visible
-        per_block_cap = max(3500, int(char_budget * 0.35))
-
-        for blk in blocks:
+        for _, _, blk in staged:
             code = blk.code
             if len(code) > per_block_cap:
                 code = smart_truncate_code(code, per_block_cap)
