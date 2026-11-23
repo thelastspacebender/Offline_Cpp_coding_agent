@@ -62,7 +62,7 @@ def execute_query(req: QueryRequest):
     t0 = time.time()
     now_str = time.strftime("%H:%M:%S")
     print(f"\n{'='*75}", flush=True)
-    print(f"[{now_str}] 📩 [API /api/query] ПОСТУПИЛ ЗАПРОС ИЗ VISUAL STUDIO 2005", flush=True)
+    print(f"[{now_str}] 📩 [API /api/query] ПОСТУПИЛ ЗАПРОС ИЗ IDE / WEB UI", flush=True)
     budget_info = f" | Бюджет: {req.time_budget_sec}с" if req.time_budget_sec else ""
     print(f"[{now_str}]    Режим: {req.mode.upper()} | Язык: {req.language or 'ru'}{budget_info}", flush=True)
     print(f"[{now_str}]    Вопрос: \"{req.question}\"", flush=True)

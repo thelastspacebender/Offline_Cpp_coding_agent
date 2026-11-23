@@ -1528,7 +1528,7 @@ class ReducingAgent:
 
         if current_file:
             ctx_parts.append(
-                f"--- АКТИВНЫЙ ФАЙЛ В РЕДАКТОРЕ VS2005 ---\n"
+                f"--- АКТИВНЫЙ ФАЙЛ В РЕДАКТОРЕ ---\n"
                 f"ССЫЛКА ДЛЯ ЦИТИРОВАНИЯ: [{os.path.basename(current_file)}:{current_line or 1}]"
             )
         if selected_code:

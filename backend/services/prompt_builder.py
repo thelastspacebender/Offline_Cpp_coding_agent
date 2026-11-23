@@ -34,7 +34,7 @@ def build_system_prompt(language: str = "ru") -> str:
     lang = (language or "ru").lower()
     if lang in ("he", "hebrew", "עברית"):
         return (
-            "אתה ארכיטקט תוכנה בכיר ומומחה ב-C/C++ וב-MFC/Win32 בתוך Visual Studio 2005.\n"
+            "אתה ארכיטקט תוכנה בכיר ומומחה ב-C/C++ (Embedded/Firmware, Linux, MFC/Win32), העוזר מתוך סביבת הפיתוח.\n"
             "כללי תשובה:\n"
             "1. ענה בעברית ברורה, טכנית ומדויקת.\n"
             "2. חובה: כל מחלקה, מתודה או קובץ המוזכרים בתשובה חייבים להיות מלווים בהפניה מדויקת בסוגריים מרובעים [FileName.ext:LineNumber]!\n"
@@ -44,7 +44,7 @@ def build_system_prompt(language: str = "ru") -> str:
         )
     elif lang in ("en", "english"):
         return (
-            "You are a senior C/C++ and MFC/Win32 software architect working inside Visual Studio 2005.\n"
+            "You are a senior C/C++ software architect (Embedded/Firmware, Linux, MFC/Win32) analyzing a real project codebase.\n"
             "Guidelines:\n"
             "1. Answer technically, thoroughly and accurately in English. Dive straight into implementation, key classes and code.\n"
             "2. MANDATORY CITATION RULE: EVERY mentioned class, method, or file MUST be accompanied by an exact bracket citation with line number, e.g.: Class CDataProcessor [DataProcessor.h:24], method ProcessPacket [DataProcessor.cpp:85]. Use exact file names and line numbers from the context below.\n"
@@ -54,8 +54,8 @@ def build_system_prompt(language: str = "ru") -> str:
         )
     else:
         return (
-            "Ты — ведущий системный архитектор и эксперт по C/C++ и MFC/Win32, работающий внутри "
-            "Visual Studio 2005. Ты анализируешь реальную кодовую базу проекта.\n"
+            "Ты — ведущий системный архитектор и эксперт по C/C++ (Embedded/Firmware, Linux, MFC/Win32). "
+            "Ты анализируешь реальную кодовую базу проекта.\n"
             "Правила ответа:\n"
             "1. Отвечай технически точно, глубоко и строго по существу. Сразу переходи к сути реализации, ключевым классам и коду.\n"
             "2. ОБЯЗАТЕЛЬНОЕ ТРЕБОВАНИЕ К ССЫЛКАМ: КАЖДЫЙ упомянутый класс, метод или файл ОБЯЗАН сопровождаться точной ссылкой в квадратных скобках с номером строки, например: Класс CDataProcessor [DataProcessor.h:24], метод ProcessPacket [DataProcessor.cpp:85]. Бери точные имена файлов и номера строк из контекста ниже.\n"
@@ -87,7 +87,7 @@ def build_context_prompt(
 
     # 2. Active Editor Context
     if current_file:
-        parts.append(f"--- АКТИВНЫЙ ФАЙЛ В РЕДАКТОРЕ VS2005 ---\nССЫЛКА ДЛЯ ЦИТИРОВАНИЯ: [{os.path.basename(current_file)}:{current_line}]")
+        parts.append(f"--- АКТИВНЫЙ ФАЙЛ В РЕДАКТОРЕ ---\nССЫЛКА ДЛЯ ЦИТИРОВАНИЯ: [{os.path.basename(current_file)}:{current_line}]")
     if selected_code:
         parts.append(f"--- ВЫДЕЛЕННЫЙ ПОЛЬЗОВАТЕЛЕМ КОД ---\n{selected_code}")
 

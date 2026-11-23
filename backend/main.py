@@ -52,7 +52,7 @@ if os.path.exists(config.web_ui_dir):
         index_file = os.path.join(config.web_ui_dir, "index.html")
         if os.path.exists(index_file):
             return FileResponse(index_file)
-        return {"status": "ok", "message": "VS2005 Qwen Backend is running"}
+        return {"status": "ok", "message": "Offline C++ Coding Agent Backend is running"}
 
 
 if __name__ == "__main__":
