@@ -401,6 +401,25 @@ class TestSemanticMapAndFunnel(unittest.TestCase):
         self.assertIn("HELPER_MARKER_OK", final_usr, "Real called helper must be rescued in Stage 3")
         self.assertNotIn("CProps::GetProp", final_usr, "Noisy boilerplate GetProp must not waste Stage 3 rescue budget")
 
+    def test_utf8_bom_file_loads_cleanly_in_map_and_funnel(self):
+        bom_path = os.path.join(self.src_dir, "BomDriver.cpp")
+        with open(bom_path, "wb") as f:
+            f.write(b"\xef\xbb\xbfvoid CBomDriver::ReadDevice() {\n    int BOM_MARKER_OK = 42;\n}\n")
+
+        db = DatabaseManager(self.db_path)
+        IndexingService(db).index_directory(self.src_dir)
+        # Confirm Indexer stored 'utf-8-bom' in DB
+        with db.get_connection() as conn:
+            enc = conn.execute("SELECT encoding FROM indexed_files WHERE file_path = ?", (bom_path,)).fetchone()[0]
+        self.assertEqual(enc, "utf-8-bom")
+
+        qwen = MockFunnelQwen()
+        svc = SearchService(db, qwen)
+        svc.map_builder.build_sync()
+        res = svc.query("What does CBomDriver::ReadDevice in BomDriver.cpp do?", mode="funnel", language="en")
+        self.assertTrue(res.success)
+        self.assertIn("BOM_MARKER_OK", qwen.final_prompts[0]["usr"])
+
 
 if __name__ == "__main__":
     unittest.main()

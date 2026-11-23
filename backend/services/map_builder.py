@@ -61,11 +61,19 @@ def _make_display_path(file_path: str) -> str:
     return parts[-1] if parts else norm
 
 
+ENCODING_ALIASES = {
+    "utf-8-bom": "utf-8-sig",
+    "latin1_lossy": "latin-1",
+    "latin1": "latin-1",
+}
+
+
 def _read_file_lines_safe(file_path: str, preferred_encoding: Optional[str] = None) -> List[str]:
     encodings: List[str] = []
     if preferred_encoding:
-        encodings.append(preferred_encoding)
-    for enc in ("utf-8", "cp1251", "cp866", "latin-1"):
+        mapped = ENCODING_ALIASES.get(preferred_encoding.lower(), preferred_encoding)
+        encodings.append(mapped)
+    for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866", "latin-1"):
         if enc not in encodings:
             encodings.append(enc)
 
@@ -73,7 +81,7 @@ def _read_file_lines_safe(file_path: str, preferred_encoding: Optional[str] = No
         try:
             with open(file_path, "r", encoding=enc) as f:
                 return f.read().splitlines()
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, LookupError):
             continue
         except Exception:
             return []

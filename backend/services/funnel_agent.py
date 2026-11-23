@@ -1226,6 +1226,7 @@ class SemanticFunnelAgent:
         while guaranteeing every selected file gets fair representation before any file takes extra slots.
         """
         per_block_cap = 3600
+        explicit_block_cap = max(6500, int(char_budget * 0.55))
         # Order blocks in round-robin passes per file (pass 0 = top block of each file, pass 1 = 2nd, etc.)
         by_file_idx: Dict[str, int] = {}
         staged: List[Tuple[int, int, RawCodeBlock]] = []
@@ -1242,8 +1243,9 @@ class SemanticFunnelAgent:
         used = 0
         for _, _, blk in staged:
             code = blk.code
-            if len(code) > per_block_cap:
-                code = smart_truncate_code(code, per_block_cap)
+            cap = explicit_block_cap if "explicit_slice" in blk.source_tag else per_block_cap
+            if len(code) > cap:
+                code = smart_truncate_code(code, cap)
             cost = len(code) + 160
             if fitted and used + cost > char_budget:
                 remaining = char_budget - used - 160

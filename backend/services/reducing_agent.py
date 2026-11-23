@@ -288,10 +288,15 @@ class ReducingAgent:
         if file_path in self._file_lines_cache:
             return self._file_lines_cache[file_path]
 
+        aliases = {
+            "utf-8-bom": "utf-8-sig",
+            "latin1_lossy": "latin-1",
+            "latin1": "latin-1",
+        }
         encodings = []
         if preferred_encoding:
-            encodings.append(preferred_encoding)
-        for enc in ("utf-8", "cp1251", "cp866", "latin-1"):
+            encodings.append(aliases.get(preferred_encoding.lower(), preferred_encoding))
+        for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866", "latin-1"):
             if enc not in encodings:
                 encodings.append(enc)
 
@@ -301,7 +306,7 @@ class ReducingAgent:
                 with open(file_path, "r", encoding=enc) as f:
                     lines = f.read().splitlines()
                 break
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, LookupError):
                 continue
             except Exception:
                 return []
