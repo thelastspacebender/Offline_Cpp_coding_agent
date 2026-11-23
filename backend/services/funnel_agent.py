@@ -53,6 +53,8 @@ NOISY_RESCUE_HELPERS = {
     "getprop", "setprop", "enterlog", "selectflow", "getstatusbit", "setstatusbit",
     "reversefloat", "updatedata", "getdlgitem", "enablewindow", "showwindow",
     "setcursel", "getcursel", "addstring", "resetcontent", "format", "loadstring",
+    "copyobj", "savetofile", "loadfromfile", "serialize", "addhistory",
+    "allocmemory", "freememory", "reset",
 }
 FILE_MENTION_RE = re.compile(
     r'([A-Za-z0-9_.\-\\/]+\.(?:cpp|c|cc|cxx|h|hpp|hxx|hh|inl))'
@@ -213,16 +215,21 @@ class SemanticFunnelAgent:
         final_char_budget = max(8500, min(18500, int((n_ctx - 4500) * 1.5)))
 
         excluded_stems = ReducingAgent._extract_exclusions(question)
-        q_idents = ReducingAgent._extract_question_identifiers(question, excluded_stems)
         pinned_files, explicit_slices = self._extract_explicit_file_requests(
             question, excluded_stems, display_to_full, base_to_fulls
         )
+        pinned_stems_low = {os.path.splitext(os.path.basename(fp))[0].lower() for fp in pinned_files}
+        raw_q_idents = ReducingAgent._extract_question_identifiers(question, excluded_stems)
+        # Drop bare filename stems (e.g. 'WsFPGA' from 'WsFPGA.cpp') from q_idents when other symbols exist
+        # so class prefixes don't falsely boost every boilerplate/constructor method in that file.
+        filtered_q_idents = [qi for qi in raw_q_idents if qi.lower() not in pinned_stems_low]
+        q_idents = filtered_q_idents if filtered_q_idents else raw_q_idents
 
         log_agent_line(
             f"[{time.strftime('%H:%M:%S')}] 🗺️ [Smart Funnel] Старт ({mode_tag}) | "
             f"n_ctx={n_ctx} | Строк карты: {len(map_entries)} | "
             f"Идентификаторы: {q_idents[:6] or 'нет'} | Закрепл. файлы: {[os.path.basename(f) for f in pinned_files] or 'нет'} | "
-            f"Исключения: {sorted(excluded_stems) or 'нет'}"
+            f"Срезы: {len(explicit_slices)} | Исключения: {sorted(excluded_stems) or 'нет'}"
         )
 
         # ---------------- STAGE 1: Map Triage + SQLite Insurance ----------------
@@ -233,6 +240,7 @@ class SemanticFunnelAgent:
             q_idents=q_idents,
             excluded_stems=excluded_stems,
             pinned_files=pinned_files,
+            explicit_slices=explicit_slices,
             display_to_full=display_to_full,
             base_to_fulls=base_to_fulls,
             file_roles=file_roles,
@@ -449,6 +457,7 @@ class SemanticFunnelAgent:
         file_roles: Dict[str, str],
         current_file: Optional[str],
         max_files: int = 10,
+        explicit_slices: Optional[List[Tuple[str, int, int]]] = None,
     ) -> Tuple[List[str], int, Dict[str, str]]:
         q_low = question.lower()
         allow_sdk_in_triage = any(k in q_low for k in ("sdk", "vendor", "macro", "generated", "resource.h", "pthread"))
@@ -471,87 +480,96 @@ class SemanticFunnelAgent:
                 if os.path.splitext(os.path.basename(e["file_path"]))[0].lower() not in excluded_stems
             ] or map_entries
 
-        # Pack formatted map lines into ~3k-token batches (<=180 lines or <=9500 chars)
-        batches: List[List[Dict[str, Any]]] = []
-        cur_batch: List[Dict[str, Any]] = []
-        cur_chars = 0
-        for e in filtered_entries:
-            line_len = len(e["formatted_line"]) + 1
-            if cur_batch and (len(cur_batch) >= MAP_BATCH_MAX_LINES or cur_chars + line_len > MAP_BATCH_MAX_CHARS):
-                batches.append(cur_batch)
-                cur_batch = []
-                cur_chars = 0
-            cur_batch.append(e)
-            cur_chars += line_len
-        if cur_batch:
-            batches.append(cur_batch)
-
-        log_agent_line(
-            f"[{time.strftime('%H:%M:%S')}] 🗺️ [Stage 1: Обзор карты] "
-            f"{len(filtered_entries)} строк карты упаковано в {len(batches)} батч."
-        )
-
         llm_picks: List[Tuple[int, str, str]] = []  # (priority, file_path, reason)
         reasons_map: Dict[str, str] = {}
+        batches: List[List[Dict[str, Any]]] = []
 
-        sys_p = (
-            "You are a senior C/C++ architect performing Stage 1 triage over a project semantic map.\n"
-            "Each line has format: `Dir/File [ROLE] (Lstart-Lend) | Syms: ... | Summary`.\n"
-            "Select the files MOST relevant to answering the user's question (up to 8 files from this batch).\n"
-            "RULES:\n"
-            "1. Respect role tags: strongly prefer [CORE], [DRIVER], [UI], [UTIL] over [TEST], [SDK], [GENERATED] "
-            "unless the user explicitly asks about tests or vendor headers.\n"
-            "2. Respect any user instruction to ignore/exclude specific files or modules.\n"
-            "3. Prefer implementation files (.cpp/.c) AND key declarations (.h) for relevant classes/methods.\n"
-            "Respond ONLY with valid JSON:\n"
-            "{\"files\": [{\"file\": \"Dir/File.cpp\", \"priority\": 1, \"reason\": \"short reason\"}]}\n"
-            "If nothing in this batch is relevant, respond: {\"files\": []}"
-        )
-
-        for b_idx, batch in enumerate(batches, 1):
-            map_block = "\n".join(e["formatted_line"] for e in batch)
-            usr_p = f"USER QUESTION:\n{question}\n\nPROJECT SEMANTIC MAP (Batch {b_idx}/{len(batches)}):\n{map_block}\n\nJSON:"
-            bt0 = time.time()
-            raw = self.qwen.generate_raw(sys_p, usr_p, temperature=0.0, max_tokens=500, timeout=65.0)
-            bdt = time.time() - bt0
-            log_agent_file_only(
-                f"STAGE 1 MAP BATCH {b_idx}/{len(batches)} RAW RESPONSE",
-                raw or "<empty>"
+        # Fast-path for targeted queries where user already named exact files/line slices + symbols:
+        # skip slow 10-batch global map triage and rely on pinned files + instant SQLite/Call-Graph lookup.
+        use_targeted_fastpath = bool(explicit_slices) or (len(pinned_files) >= 2 and len(q_idents) >= 2)
+        if use_targeted_fastpath:
+            log_agent_line(
+                f"[{time.strftime('%H:%M:%S')}] ⚡ [Stage 1: Прицельный режим] "
+                f"Указаны точные файлы/строки ({len(pinned_files)}) — пропуск полного перебора карты, подбор через SQLite + Call-Graph."
             )
-
-            parsed = _parse_llm_json(raw)
-            batch_files = parsed.get("files") or parsed.get("relevant") or []
-            if not isinstance(batch_files, list):
-                batch_files = []
-
-            batch_hits = 0
-            for item in batch_files:
-                if isinstance(item, str):
-                    f_ref, prio, reason = item, 2, "selected from map"
-                elif isinstance(item, dict):
-                    f_ref = str(item.get("file", "")).strip()
-                    try:
-                        prio = int(item.get("priority", 2))
-                    except Exception:
-                        prio = 2
-                    reason = str(item.get("reason", "")).strip()
-                else:
-                    continue
-
-                resolved = self._resolve_file_ref(f_ref, display_to_full, base_to_fulls)
-                if not resolved:
-                    continue
-                stem_low = os.path.splitext(os.path.basename(resolved))[0].lower()
-                if stem_low in excluded_stems:
-                    continue
-                llm_picks.append((max(1, min(3, prio)), resolved, reason))
-                if resolved not in reasons_map and reason:
-                    reasons_map[resolved] = reason
-                batch_hits += 1
+        else:
+            # Pack formatted map lines into ~3.5k-token batches
+            cur_batch: List[Dict[str, Any]] = []
+            cur_chars = 0
+            for e in filtered_entries:
+                line_len = len(e["formatted_line"]) + 1
+                if cur_batch and (len(cur_batch) >= MAP_BATCH_MAX_LINES or cur_chars + line_len > MAP_BATCH_MAX_CHARS):
+                    batches.append(cur_batch)
+                    cur_batch = []
+                    cur_chars = 0
+                cur_batch.append(e)
+                cur_chars += line_len
+            if cur_batch:
+                batches.append(cur_batch)
 
             log_agent_line(
-                f"[{time.strftime('%H:%M:%S')}]    ✓ [Stage 1 | батч {b_idx}/{len(batches)} | {bdt:.1f}с] отобрано файлов: {batch_hits}"
+                f"[{time.strftime('%H:%M:%S')}] 🗺️ [Stage 1: Обзор карты] "
+                f"{len(filtered_entries)} строк карты упаковано в {len(batches)} батч."
             )
+
+            sys_p = (
+                "You are a senior C/C++ architect performing Stage 1 triage over a project semantic map.\n"
+                "Each line has format: `Dir/File [ROLE] (Lstart-Lend) | Syms: ... | Summary`.\n"
+                "Select ONLY the top 1 to 4 files MOST relevant to answering the user's question.\n"
+                "RULES:\n"
+                "1. Strongly prefer [CORE], [DRIVER], [UI], [UTIL] over [TEST], [SDK], [GENERATED] "
+                "unless the user explicitly asks about tests or vendor headers.\n"
+                "2. Respect any user instruction to ignore/exclude specific files or modules.\n"
+                "3. Keep each reason <= 6 words.\n"
+                "Respond ONLY with valid JSON:\n"
+                "{\"files\": [{\"file\": \"Dir/File.cpp\", \"priority\": 1, \"reason\": \"short reason\"}]}\n"
+                "If nothing in this batch is relevant, respond: {\"files\": []}"
+            )
+
+            for b_idx, batch in enumerate(batches, 1):
+                map_block = "\n".join(e["formatted_line"] for e in batch)
+                usr_p = f"USER QUESTION:\n{question}\n\nPROJECT SEMANTIC MAP (Batch {b_idx}/{len(batches)}):\n{map_block}\n\nJSON:"
+                bt0 = time.time()
+                raw = self.qwen.generate_raw(sys_p, usr_p, temperature=0.0, max_tokens=240, timeout=55.0)
+                bdt = time.time() - bt0
+                log_agent_file_only(
+                    f"STAGE 1 MAP BATCH {b_idx}/{len(batches)} RAW RESPONSE",
+                    raw or "<empty>"
+                )
+
+                parsed = _parse_llm_json(raw)
+                batch_files = parsed.get("files") or parsed.get("relevant") or []
+                if not isinstance(batch_files, list):
+                    batch_files = []
+
+                batch_hits = 0
+                for item in batch_files:
+                    if isinstance(item, str):
+                        f_ref, prio, reason = item, 2, "selected from map"
+                    elif isinstance(item, dict):
+                        f_ref = str(item.get("file", "")).strip()
+                        try:
+                            prio = int(item.get("priority", 2))
+                        except Exception:
+                            prio = 2
+                        reason = str(item.get("reason", "")).strip()
+                    else:
+                        continue
+
+                    resolved = self._resolve_file_ref(f_ref, display_to_full, base_to_fulls)
+                    if not resolved:
+                        continue
+                    stem_low = os.path.splitext(os.path.basename(resolved))[0].lower()
+                    if stem_low in excluded_stems:
+                        continue
+                    llm_picks.append((max(1, min(3, prio)), resolved, reason))
+                    if resolved not in reasons_map and reason:
+                        reasons_map[resolved] = reason
+                    batch_hits += 1
+
+                log_agent_line(
+                    f"[{time.strftime('%H:%M:%S')}]    ✓ [Stage 1 | батч {b_idx}/{len(batches)} | {bdt:.1f}с] отобрано файлов: {batch_hits}"
+                )
 
         # Stage 1B: Instant SQLite Insurance (symbols + call_relations + FTS5 BM25)
         sqlite_insurance = self._sqlite_insurance_files(question, q_idents, excluded_stems, file_roles, limit=6)
@@ -739,18 +757,21 @@ class SemanticFunnelAgent:
                                     m_calls.append(cn)
 
                         name_low = sym_name.lower()
-                        short_low = name_low.split("::")[-1]
+                        parts_low = name_low.split("::")
+                        short_low = parts_low[-1]
+                        is_ctor = len(parts_low) >= 2 and parts_low[-1] == parts_low[-2]
                         calls_low = " ".join(m_calls).lower()
-                        q_match = any(ql in name_low or ql in calls_low or ql in sig.lower() for ql in q_lows)
-                        is_noisy = short_low in NOISY_RESCUE_HELPERS and not q_match
+                        # Match exact identifiers against method short name, outgoing calls, or signature params (NOT class prefix)
+                        q_match = any(ql in short_low or ql in calls_low or ql in sig.lower() for ql in q_lows)
+                        is_noisy = (short_low in NOISY_RESCUE_HELPERS or is_ctor) and not q_match
                         is_dtor = "~" in sym_name
 
                         # Relevance score per file so giant classes keep only the top 30 methods in Stage 2
                         rel_score = (
                             (100 if q_match else 0)
                             + (20 if sr["kind"] in ("function", "method") else 0)
-                            - (50 if is_noisy else 0)
-                            - (30 if is_dtor else 0)
+                            - (60 if is_noisy else 0)
+                            - (50 if is_dtor else 0)
                             + min(25, max(0, le - ls) // 4)
                         )
 
@@ -982,6 +1003,7 @@ class SemanticFunnelAgent:
         called_in_raw: Set[str] = set()
         pinned_set = set(pinned_files or [])
         q_ident_shorts = {q.split("::")[-1].lower() for q in q_idents}
+        q_idents_low = [q.lower() for q in q_idents]
 
         # 0. Load any explicitly requested file:line ranges first at top priority
         for fp, ls, le in (explicit_slices or []):
@@ -1024,9 +1046,13 @@ class SemanticFunnelAgent:
             if not code:
                 continue
 
+            parts_low = it.name.lower().split("::")
+            short_low = parts_low[-1]
+            is_ctor = len(parts_low) >= 2 and parts_low[-1] == parts_low[-2]
+            is_boilerplate = short_low in NOISY_RESCUE_HELPERS or is_ctor or "~" in it.name
             q_hit = (
-                it.file_path in pinned_set
-                or any(qi.lower() in it.name.lower() or qi.lower() in code.lower() for qi in q_idents)
+                (it.file_path in pinned_set and not is_boilerplate)
+                or any(ql in short_low or ql in code.lower() for ql in q_idents_low)
             )
             blocks.append(RawCodeBlock(
                 file_path=it.file_path,
@@ -1036,7 +1062,7 @@ class SemanticFunnelAgent:
                 symbols=[it.name],
                 source_tag="stage2",
                 role_tag=it.role_tag,
-                priority=0 if q_hit else 1,
+                priority=0 if q_hit else (2 if is_boilerplate else 1),
                 code=code,
             ))
             loaded_symbol_names.add(it.name)
@@ -1092,6 +1118,11 @@ class SemanticFunnelAgent:
                 for r in cur.fetchall():
                     if len(rescued_blocks) >= max_rescue:
                         break
+                    r_name = r["name"] or ""
+                    r_parts = r_name.lower().split("::")
+                    is_r_ctor = len(r_parts) >= 2 and r_parts[-1] == r_parts[-2]
+                    if (is_r_ctor or "~" in r_name) and short.lower() not in q_ident_shorts:
+                        continue
                     fp = r["file_path"]
                     stem_low = os.path.splitext(os.path.basename(fp))[0].lower()
                     if stem_low in excluded_stems:
@@ -1210,8 +1241,9 @@ class SemanticFunnelAgent:
                     cur = nxt
             merged.append(cur)
 
-        # Sort final blocks: highest priority (0 -> 1 -> 2), core/driver before test/sdk
+        # Sort final blocks: explicit slices first, then highest priority (0 -> 1 -> 2), core/driver before test/sdk
         merged.sort(key=lambda b: (
+            0 if "explicit_slice" in b.source_tag else 1,
             b.priority,
             1 if b.role_tag in ("test", "sdk", "generated") else 0,
             b.display_path.lower(),
@@ -1223,17 +1255,19 @@ class SemanticFunnelAgent:
     def _fit_blocks_to_budget(blocks: List[RawCodeBlock], char_budget: int) -> List[RawCodeBlock]:
         """
         Ensures total raw code fits comfortably inside the active LLM context window
-        while guaranteeing every selected file gets fair representation before any file takes extra slots.
+        while guaranteeing explicit slices and every selected file get fair representation.
         """
         per_block_cap = 3600
-        explicit_block_cap = max(6500, int(char_budget * 0.55))
-        # Order blocks in round-robin passes per file (pass 0 = top block of each file, pass 1 = 2nd, etc.)
+        explicit_block_cap = max(7500, int(char_budget * 0.55))
+        # Order blocks in round-robin passes per file (explicit_slice ALWAYS tier -1 first!)
         by_file_idx: Dict[str, int] = {}
         staged: List[Tuple[int, int, RawCodeBlock]] = []
         for orig_idx, blk in enumerate(blocks):
+            if "explicit_slice" in blk.source_tag:
+                staged.append((-1, orig_idx, blk))
+                continue
             f_slot = by_file_idx.get(blk.file_path, 0)
             by_file_idx[blk.file_path] = f_slot + 1
-            # Priority 0 blocks stay front-loaded; beyond 1st block of a file yields to other files first
             round_tier = 0 if (blk.priority == 0 and f_slot == 0) else (1 if f_slot == 0 else f_slot + 1)
             staged.append((round_tier, orig_idx, blk))
 
