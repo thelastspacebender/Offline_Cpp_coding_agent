@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Extensibility xmlns="http://schemas.microsoft.com/AutomationExtensibility">
+  <HostApplication>
+    <Name>Microsoft Visual Studio</Name>
+    <Version>8.0</Version>
+  </HostApplication>
+  <HostApplication>
+    <Name>Microsoft Visual Studio</Name>
+    <Version>9.0</Version>
+  </HostApplication>
+  <HostApplication>
+    <Name>Microsoft Visual Studio</Name>
+    <Version>10.0</Version>
+  </HostApplication>
+  <HostApplication>
+    <Name>Microsoft Visual Studio</Name>
+    <Version>11.0</Version>
+  </HostApplication>
+  <HostApplication>
+    <Name>Microsoft Visual Studio</Name>
+    <Version>12.0</Version>
+  </HostApplication>
+  <Addin>
+    <FriendlyName>Offline C++ Coding Agent</FriendlyName>
+    <Description>100% local offline Map-Reduce &amp; Call-Graph AI coding agent for Visual Studio (2005-2013)</Description>
+    <Assembly>%BIN_DIR%\VS2005QwenRAG.dll</Assembly>
+    <FullClassName>VS2005QwenRAG.Core.Connect</FullClassName>
+    <LoadBehavior>1</LoadBehavior>
+    <CommandPreload>1</CommandPreload>
+    <CommandLineSafe>0</CommandLineSafe>
+  </Addin>
+</Extensibility>

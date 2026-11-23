@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offline C++ Coding Agent — Map-Reduce & Call Graph</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Segoe+UI:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo-area">
+                <span class="logo-icon">⚡</span>
+                <div>
+                    <h1>Offline C++ Coding Agent</h1>
+                    <span class="subtitle">Universal Map-Reduce & Call-Graph AI • VS Code / Visual Studio / Any Project</span>
+                </div>
+            </div>
+            <div class="status-badges">
+                <div class="badge" id="badgeServer">
+                    <span class="dot yellow"></span> <span id="serverStatusText">Проверка сервера...</span>
+                </div>
+                <div class="badge" id="badgeStats">
+                    📁 <span id="filesCount">0</span> файлов | ⚙️ <span id="symbolsCount">0</span> символов | 🔗 <span id="callsCount">0</span> связей
+                </div>
+                <select id="langSelect" style="background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer;">
+                    <option value="ru" selected>🇷🇺 Русский</option>
+                    <option value="en">🇬🇧 English</option>
+                    <option value="he">🇮🇱 עברית</option>
+                </select>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <div class="main-content">
+            <!-- Left Panel: Indexing, Model Manager & Controls -->
+            <aside class="sidebar">
+                <div class="card">
+                    <h3>📁 Индексация проекта</h3>
+                    <p class="hint">Укажите путь к любой папке с C/C++ кодом (VS Code, Visual Studio 2005–2022, CLion, CMake).</p>
+                    <div class="input-group">
+                        <input type="text" id="indexPathInput" placeholder="C:\Projects\MyCppProject" spellcheck="false">
+                        <button class="btn btn-primary" id="btnIndex">🔄 Индексировать</button>
+                    </div>
+                    <div id="indexProgress" class="progress-bar hidden">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <div id="indexResultMsg" class="result-msg"></div>
+                </div>
+
+                <div class="card">
+                    <h3>🧠 Модель и Железо (GGUF)</h3>
+                    <div class="hw-summary" id="hwSummary">Загрузка ТТХ ПК...</div>
+                    <div class="input-group">
+                        <select id="modelSelect" class="select-field"></select>
+                        <div class="row-inline">
+                            <input type="text" id="customModelPath" placeholder="Путь к любому .gguf файлу" style="flex:1; min-width:0;" spellcheck="false">
+                            <button class="btn btn-secondary" id="btnBrowseModel" title="Выбрать .gguf на диске">📂</button>
+                        </div>
+                        <div class="row-inline">
+                            <select id="ctxSelect" class="select-field" style="flex:1">
+                                <option value="8192">8k ctx</option>
+                                <option value="16384" selected>16k ctx</option>
+                                <option value="32768">32k ctx</option>
+                            </select>
+                            <button class="btn btn-primary" id="btnApplyModel" style="flex:1">Применить</button>
+                        </div>
+                        <button class="btn btn-secondary" id="btnOpenCatalog">⬇ Каталог моделей (1.5B–32B)</button>
+                    </div>
+                    <div id="modelStatusMsg" class="result-msg"></div>
+                </div>
+
+                <div class="card">
+                    <h3>🎯 Режим поиска</h3>
+                    <div class="mode-selector">
+                        <label class="mode-option active">
+                            <input type="radio" name="searchMode" value="reduce" checked>
+                            <span class="mode-title">🔄 Reducing AI (до 5 мин)</span>
+                            <span class="mode-desc">Честный проход по всем хедерам, .cpp и Rescue отсеянных</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="reduce_deep">
+                            <span class="mode-title">🔬 Deep Reducing (до 10 мин)</span>
+                            <span class="mode-desc">Глубокое сканирование без лимитов и 2-й хоп Rescue</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="fast">
+                            <span class="mode-title">⚡ Быстрый RAG (Local LLM)</span>
+                            <span class="mode-desc">Быстрый гибридный поиск (FTS5 + Vector + Call Graph)</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="callers">
+                            <span class="mode-title">📍 Поиск вызовов (Call Graph)</span>
+                            <span class="mode-desc">Кто и в каких строках вызывает эту функцию</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="definition">
+                            <span class="mode-title">📑 Найти определение (Definition)</span>
+                            <span class="mode-desc">Сигнатура, объявление структуры/класса/макроса</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="grep">
+                            <span class="mode-title">🔎 Полнотекстовый поиск (FTS5)</span>
+                            <span class="mode-desc">Быстрый поиск строк с ранжированием BM25</span>
+                        </label>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Right Panel: Chat & Results -->
+            <main class="chat-area">
+                <div class="results-viewer" id="resultsViewer">
+                    <div class="welcome-box" id="welcomeBox">
+                        <h2>Добро пожаловать в Offline C++ Coding Agent!</h2>
+                        <p>Локальный офлайн-ассистент на базе <strong>llama.cpp (Vulkan / CUDA / CPU)</strong> с многопроходным движком <strong>Map-Reduce + Rescue</strong> и точным Call-Graph.</p>
+                        <div class="features-grid">
+                            <div class="feature-card">
+                                <strong>🔄 Map-Reduce + Rescue</strong>
+                                <span>Сканирует заголовки, маппит .cpp и досканирует забытые зависимости.</span>
+                            </div>
+                            <div class="feature-card">
+                                <strong>🧠 Любая .gguf модель</strong>
+                                <span>Переключайтесь между 1.5B–32B или подключите свой .gguf файл с диска.</span>
+                            </div>
+                            <div class="feature-card">
+                                <strong>🧩 Все IDE</strong>
+                                <span>VS Code, Visual Studio 2005–2013, и любой проект (VS 2015–2022/CLion) через Web UI.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="answerContent" class="answer-content hidden"></div>
+
+                    <!-- Citations panel -->
+                    <div id="citationsContainer" class="citations-container hidden">
+                        <h4>📍 Ссылки на код и места вызовов:</h4>
+                        <ul id="citationsList" class="citations-list"></ul>
+                    </div>
+                </div>
+
+                <!-- Input area -->
+                <div class="chat-input-bar">
+                    <textarea id="questionInput" placeholder="Задайте вопрос по связям, функциям или архитектуре кода... (Ctrl+Enter)" rows="2"></textarea>
+                    <button class="btn btn-primary btn-send" id="btnSend">Отправить</button>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Model Catalog Download Modal -->
+    <div id="catalogModal" class="modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>📦 Каталог GGUF-моделей (проверено под ваш ПК)</h3>
+                <button class="btn btn-secondary" id="btnCloseCatalog">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="dlProgressBox" class="hidden">
+                    <div id="dlProgressText" style="font-size:12px;">Скачивание...</div>
+                    <div class="dl-progress"><div id="dlProgressFill" class="dl-progress-fill"></div></div>
+                </div>
+                <div id="catalogList" style="display:flex; flex-direction:column; gap:10px;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

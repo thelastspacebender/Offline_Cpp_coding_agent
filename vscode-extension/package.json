@@ -1,0 +1,64 @@
+{
+  "name": "offline-cpp-coding-agent",
+  "displayName": "Offline C++ Coding Agent",
+  "description": "100% local Map-Reduce & Call-Graph AI coding agent powered by llama.cpp (Qwen2.5-Coder / DeepSeek / custom GGUF)",
+  "version": "1.0.0",
+  "publisher": "thelastspacebender",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:offlineCppAgent.chatView",
+    "onCommand:offlineCppAgent.indexWorkspace",
+    "onCommand:offlineCppAgent.askSelection",
+    "onCommand:offlineCppAgent.selectModelFile"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "offlineCppAgentContainer",
+          "title": "Offline C++ Agent",
+          "icon": "media/agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "offlineCppAgentContainer": [
+        {
+          "type": "webview",
+          "id": "offlineCppAgent.chatView",
+          "name": "Code Assistant"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "offlineCppAgent.indexWorkspace",
+        "title": "Offline C++ Agent: Index Current Workspace"
+      },
+      {
+        "command": "offlineCppAgent.askSelection",
+        "title": "Offline C++ Agent: Ask About Selected Code"
+      },
+      {
+        "command": "offlineCppAgent.selectModelFile",
+        "title": "Offline C++ Agent: Select Local .gguf Model File"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "offlineCppAgent.askSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}

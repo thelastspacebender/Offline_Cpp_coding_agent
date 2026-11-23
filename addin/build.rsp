@@ -1,0 +1,19 @@
+/target:library
+/platform:x86
+/optimize+
+/r:"C:\Program Files (x86)\Common Files\Microsoft Shared\MSEnv\PublicAssemblies\extensibility.dll"
+/r:"C:\Program Files (x86)\Microsoft Visual Studio 8\Common7\IDE\PublicAssemblies\EnvDTE.dll"
+/r:"C:\Program Files (x86)\Microsoft Visual Studio 8\Common7\IDE\PublicAssemblies\EnvDTE80.dll"
+/r:"C:\Program Files (x86)\Microsoft Visual Studio 8\Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.CommandBars.dll"
+/r:System.dll
+/r:System.Windows.Forms.dll
+/r:System.Drawing.dll
+/r:System.Data.dll
+Properties\AssemblyInfo.cs
+Core\Models.cs
+Core\DteNavigator.cs
+Core\Connect.cs
+Network\MiniJson.cs
+Network\BackendClient.cs
+UI\AssistantControl.Designer.cs
+UI\AssistantControl.cs

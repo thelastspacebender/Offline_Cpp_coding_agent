@@ -1,0 +1,106 @@
+{
+  "python_embed_url": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+  "get_pip_url": "https://bootstrap.pypa.io/get-pip.py",
+  "llama_cpp": {
+    "releases_api": "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=5",
+    "fallback_tag": "b12633",
+    "fallback_urls": {
+      "vulkan": "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-win-vulkan-x64.zip",
+      "cpu": "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-win-cpu-x64.zip",
+      "cuda": "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-win-cuda-12.4-x64.zip",
+      "cudart": "https://github.com/ggml-org/llama.cpp/releases/download/b12633/cudart-llama-bin-win-cuda-12.4-x64.zip"
+    }
+  },
+  "models": [
+    {
+      "id": "qwen2.5-coder-1.5b-q4",
+      "name": "Qwen2.5-Coder-1.5B-Instruct (Q4_K_M)",
+      "filename": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+      "size_gb": 1.1,
+      "min_ram_gb": 6,
+      "rec_vram_gb": 2,
+      "rec_ctx": 8192,
+      "default_selected": false,
+      "tier": "ultra_fast",
+      "use_case_en": "Ultra-fast scanning for low-spec laptops or CPU-only machines.",
+      "use_case_ru": "Сверхбыстрое сканирование для слабых ноутбуков или запуска на CPU.",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+      "fallback_url": "https://huggingface.co/bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"
+    },
+    {
+      "id": "qwen2.5-coder-3b-q4",
+      "name": "Qwen2.5-Coder-3B-Instruct (Q4_K_M)",
+      "filename": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+      "size_gb": 2.0,
+      "min_ram_gb": 8,
+      "rec_vram_gb": 4,
+      "rec_ctx": 16384,
+      "default_selected": false,
+      "tier": "fast",
+      "use_case_en": "Fast Map-Reduce coding assistant for 8-12 GB RAM laptops and 4 GB GPUs.",
+      "use_case_ru": "Быстрый Map-Reduce для ноутбуков с 8–12 ГБ ОЗУ и видеокартами 4 ГБ.",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+      "fallback_url": "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"
+    },
+    {
+      "id": "qwen2.5-coder-7b-q4",
+      "name": "Qwen2.5-Coder-7B-Instruct (Q4_K_M) [Recommended]",
+      "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "size_gb": 4.68,
+      "min_ram_gb": 16,
+      "rec_vram_gb": 6,
+      "rec_ctx": 16384,
+      "default_selected": true,
+      "tier": "balanced",
+      "use_case_en": "Best balance of speed and C/C++ accuracy. Fits 16 GB RAM & iGPU/mid-range GPUs.",
+      "use_case_ru": "Оптимальный баланс скорости и точности для C/C++ Map-Reduce (16 ГБ ОЗУ, iGPU/6-8 ГБ VRAM).",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "fallback_url": "https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+    },
+    {
+      "id": "qwen2.5-coder-14b-q4",
+      "name": "Qwen2.5-Coder-14B-Instruct (Q4_K_M)",
+      "filename": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "size_gb": 9.0,
+      "min_ram_gb": 24,
+      "rec_vram_gb": 12,
+      "rec_ctx": 16384,
+      "default_selected": false,
+      "tier": "deep",
+      "use_case_en": "Strong architectural reasoning and complex C++ refactoring on 12+ GB VRAM GPUs.",
+      "use_case_ru": "Глубокий анализ сложной архитектуры и рефакторинг C++ (24–32 ГБ ОЗУ / 12 ГБ VRAM).",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "fallback_url": "https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"
+    },
+    {
+      "id": "deepseek-coder-v2-lite-q4",
+      "name": "DeepSeek-Coder-V2-Lite-Instruct MoE (Q4_K_M)",
+      "filename": "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
+      "size_gb": 10.4,
+      "min_ram_gb": 16,
+      "rec_vram_gb": 12,
+      "rec_ctx": 16384,
+      "default_selected": false,
+      "tier": "moe_fast",
+      "use_case_en": "16B Mixture-of-Experts (2.4B active): very fast token generation with deep code understanding.",
+      "use_case_ru": "MoE 16B (2.4B активных): очень быстрая генерация при глубоком понимании C/C++.",
+      "url": "https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
+      "fallback_url": ""
+    },
+    {
+      "id": "qwen2.5-coder-32b-q4",
+      "name": "Qwen2.5-Coder-32B-Instruct (Q4_K_M)",
+      "filename": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+      "size_gb": 19.8,
+      "min_ram_gb": 48,
+      "rec_vram_gb": 24,
+      "rec_ctx": 32768,
+      "default_selected": false,
+      "tier": "max_accuracy",
+      "use_case_en": "Maximum local accuracy for workstations (RTX 3090/4090 24 GB VRAM or 48-64 GB RAM).",
+      "use_case_ru": "Максимальное локальное качество для рабочих станций (24 ГБ VRAM или 48–64 ГБ ОЗУ).",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF/resolve/main/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+      "fallback_url": "https://huggingface.co/bartowski/Qwen2.5-Coder-32B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf"
+    }
+  ]
+}

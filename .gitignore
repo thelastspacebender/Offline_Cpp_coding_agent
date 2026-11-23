@@ -1,0 +1,43 @@
+# GGUF models and huge binaries
+models/*.gguf
+models/*.bin
+bin/*.zip
+bin/ggml*
+bin/llama*
+bin/libomp*
+bin/LICENSE*
+bin/mtmd*
+bin/cudart*
+
+# SQLite database & vector index artifacts
+backend/storage/*.db
+backend/storage/*.db-journal
+backend/storage/*.npz
+backend/storage/vector_meta.json
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+runtime/
+
+# Visual Studio & Addin build outputs
+bin/*.dll
+bin/VS2005QwenRAG.tlb
+*.obj
+*.pdb
+*.user
+*.suo
+*.ncb
+*.idb
+*.ilk
+Debug/
+Release/
+ipch/
+
+# Logs & scratch
+*.log
+scratch/
