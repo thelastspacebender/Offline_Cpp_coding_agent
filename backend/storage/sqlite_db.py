@@ -82,13 +82,33 @@ class DatabaseManager:
                     tokenize='porter unicode61'
                 );
             """)
+
+            # Table for Adaptive Semantic File Map (cached by file_mtime)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS file_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    section_id TEXT NOT NULL DEFAULT 'file',
+                    line_start INTEGER DEFAULT 1,
+                    line_end INTEGER DEFAULT 1,
+                    role_tag TEXT NOT NULL DEFAULT 'core',
+                    summary TEXT NOT NULL,
+                    key_symbols TEXT DEFAULT '',
+                    file_mtime REAL DEFAULT 0,
+                    model_name TEXT DEFAULT '',
+                    UNIQUE(file_path, section_id)
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_file_summaries_path ON file_summaries(file_path);")
             conn.commit()
 
-    def clear(self):
+    def clear(self, keep_summaries: bool = True):
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM indexed_files;")
             cur.execute("DELETE FROM symbols;")
             cur.execute("DELETE FROM call_relations;")
             cur.execute("DELETE FROM rag_fts;")
+            if not keep_summaries:
+                cur.execute("DELETE FROM file_summaries;")
             conn.commit()

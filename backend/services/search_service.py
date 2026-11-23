@@ -16,6 +16,8 @@ from ..storage.vector_index import VectorIndex
 from .qwen_service import QwenService
 from .prompt_builder import build_system_prompt, build_context_prompt
 from .reducing_agent import ReducingAgent
+from .map_builder import MapBuilder
+from .funnel_agent import SemanticFunnelAgent
 
 
 STOP_WORDS: Set[str] = {
@@ -118,6 +120,8 @@ class SearchService:
         self.vector = VectorIndex(db_manager)
         self.qwen = qwen_service
         self.reducer = ReducingAgent(db_manager, qwen_service, self.graph, self.fts)
+        self.map_builder = MapBuilder(db_manager, qwen_service, self.graph)
+        self.funnel = SemanticFunnelAgent(db_manager, qwen_service, self.graph, self.fts, self.map_builder)
         self.last_query_symbols: List[str] = []
 
     def clear_history(self):
@@ -137,7 +141,8 @@ class SearchService:
     ) -> SearchResult:
         """
         Executes query based on selected mode.
-        Modes: 'ask'/'reduce', 'reduce_deep', 'fast', 'callers', 'definition', 'grep'
+        Modes: 'funnel', 'funnel_deep', 'ask'/'reduce', 'reduce_deep', 'reduce_raw',
+               'fast', 'callers', 'definition', 'grep'
         """
         mode = mode.lower().strip()
 
@@ -155,7 +160,54 @@ class SearchService:
                 selected_code=selected_code,
                 language=language
             )
+        elif mode in ("funnel", "funnel_deep"):
+            is_deep = (mode == "funnel_deep")
+            if self.map_builder.is_ready(min_coverage=0.1):
+                return self.funnel.run(
+                    question=question,
+                    current_file=current_file,
+                    current_line=current_line,
+                    selected_code=selected_code,
+                    language=language,
+                    budget_sec=time_budget_sec or (300 if is_deep else 180),
+                    deep=is_deep
+                )
+            res = self.reducer.run(
+                question=question,
+                current_file=current_file,
+                current_line=current_line,
+                selected_code=selected_code,
+                language=language,
+                budget_sec=time_budget_sec or (600 if is_deep else 300),
+                deep=is_deep
+            )
+            res.answer = (
+                "ℹ️ *Семантическая карта проекта ещё не собрана — выполнен резервный проход Map-Reduce. "
+                "Соберите карту (1 раз), чтобы режим Smart Funnel работал за 1–2 мин со 100% охватом.*\n\n"
+                + res.answer
+            )
+            return res
+        elif mode == "reduce_raw":
+            return self.reducer.run(
+                question=question,
+                current_file=current_file,
+                current_line=current_line,
+                selected_code=selected_code,
+                language=language,
+                budget_sec=time_budget_sec or 300,
+                deep=False
+            )
         elif mode == "reduce_deep":
+            if self.map_builder.is_ready(min_coverage=0.5):
+                return self.funnel.run(
+                    question=question,
+                    current_file=current_file,
+                    current_line=current_line,
+                    selected_code=selected_code,
+                    language=language,
+                    budget_sec=time_budget_sec or 300,
+                    deep=True
+                )
             return self.reducer.run(
                 question=question,
                 current_file=current_file,
@@ -166,6 +218,16 @@ class SearchService:
                 deep=True
             )
         else:
+            if self.map_builder.is_ready(min_coverage=0.5):
+                return self.funnel.run(
+                    question=question,
+                    current_file=current_file,
+                    current_line=current_line,
+                    selected_code=selected_code,
+                    language=language,
+                    budget_sec=time_budget_sec or 180,
+                    deep=False
+                )
             return self.reducer.run(
                 question=question,
                 current_file=current_file,

@@ -8,8 +8,21 @@ Works with **Visual Studio Code** (and Cursor / VSCodium), **Classic Visual Stud
 
 ## Core Architecture
 
-### 1. Multi-Pass Stateless Map-Reduce + Rescue (`ReducingAgent`)
-Instead of relying solely on top-k snippets, `ReducingAgent` systematically scans your repository within a configurable time budget (**5 minutes Standard** / **10 minutes Deep**) without exceeding the local LLM context window:
+### 1. Adaptive Semantic Map (`MapBuilder`) & 3-Stage Smart Funnel (`SemanticFunnelAgent`)
+For large C/C++ repositories (500+ files), scanning every raw header on every question is slow. The **Adaptive Semantic Map + 3-Stage Funnel** architecture achieves **100% file coverage in ~1–2 minutes per query**:
+
+1. **One-Time Incremental Map Build (`MapBuilder`):**
+   - Stores a persistent, `file_mtime`-cached semantic map in SQLite (`file_summaries`), with resume-on-cancel and instant re-use across re-indexes.
+   - Normal files (`<= 400` lines) compress to **1 dense line** with an architectural role tag (`[CORE]`, `[DRIVER]`, `[UI]`, `[TEST]`, `[SDK]`, `[GENERATED]`, `[UTIL]`), key symbols, and a 1-sentence responsibility summary.
+   - Large monolithic files (`> 400` lines) are **adaptively split into 2–5 logical sections** (grouped by class/scope or line blocks).
+   - Standard SDK/vendor headers (`pthread.h`, `zlib.h`, `resource.h`, etc.), macro-only tables (`>= 80%` macros), and static data tables are classified **instantaneously via heuristics (0 LLM calls)**, while small files are batched 3–4 per LLM prompt.
+2. **Stage 1 — Map Triage + SQLite Insurance:** Scans 100% of the semantic map in 2–4 compact ~3k-token batches (distinguishing `[CORE]`/`[DRIVER]` from `[TEST]`/`[SDK]`) while SQLite (`FTS5` + `symbols` + `call_relations`) reinforces exact C++ identifiers in <50ms → selects 10–15 target files.
+3. **Stage 2 — AST Method Skeleton:** Extracts function signatures and outgoing calls from SQLite for the selected files and lets the LLM pick 10–18 target methods in 1–2 batches.
+4. **Stage 3 — Raw Source Bodies + Call-Graph Rescue:** Loads exact line-numbered source bodies from disk and automatically rescues missing callee implementations (`%::MethodName`) and working callers via the AST Call-Graph.
+5. **Stage 4 — Grounded Final Synthesis:** Produces detailed answers with clickable `[FileName.ext:LineNumber]` citations and an explicit anti-hallucination guard forbidding fabrication of unshown function bodies.
+
+### 2. Multi-Pass Stateless Map-Reduce + Rescue (`ReducingAgent`)
+When no semantic map has been built yet (or in fallback mode), `ReducingAgent` systematically scans your repository within a configurable time budget (**5 minutes Standard** / **10 minutes Deep**) without exceeding the local LLM context window:
 
 1. **Pass 0 — Queue Ordering:** Extracts search keywords only to prioritize relevant headers first (zero files are excluded).
 2. **Pass 1 — Headers Map:** Scans all header files (`.h`, `.hpp`, `.hxx`, `.hh`, `.inl`) and compact outlines of standalone `.c`/`.cpp` files in isolated stateless batches, retaining only `{file, line_range, symbols, reason}`.
@@ -18,7 +31,7 @@ Instead of relying solely on top-k snippets, `ReducingAgent` systematically scan
 5. **Pass 4 — Recursive Reduce:** Merges overlapping line ranges (`±5` context lines), reads exact line-numbered source from disk, and iteratively compresses blocks if they exceed the active LLM context window.
 6. **Pass 5 — Final Synthesis:** Generates grounded technical answers where every referenced class, method, or file has a clickable `[FileName.ext:LineNumber]` citation.
 
-### 2. Hybrid Fast Engines
+### 3. Hybrid Fast Engines
 - **AST Call Graph (`tree-sitter-cpp` + MFC/Win32 fallback lexer):** Instant lookup of callers, callees, and symbol definitions.
 - **SQLite FTS5 BM25 & Pure-NumPy Vector Index:** Exact identifier, constant, and semantic search.
 - **Zero-Trash File Scanner & Multi-Encoding Support:** Automatically skips `.pch`, `.obj`, `.pdb`, `Debug/`, `Release/`, `ipch/`, `.git/` and safely decodes `utf-8`, `cp1251`, `cp866`, and `latin-1`.
@@ -93,11 +106,11 @@ Offline_Cpp_coding_agent/
 ├── backend/
 │   ├── main.py                   # FastAPI server + Web UI mount
 │   ├── llama_launcher.py         # Dynamic llama-server runner reading config.json
-│   ├── api/                      # /api/query, /api/index, /api/models/*, /api/system/hardware
+│   ├── api/                      # /api/query, /api/index, /api/map/*, /api/models/*, /api/system/hardware
 │   ├── core/                     # hardware.py, file_scanner.py, encoding_utils.py, logger
 │   ├── parser/                   # tree_sitter_cpp.py + multi-pass MFC fallback lexer
-│   ├── storage/                  # SQLite FTS5, Call-Graph store, NumPy vector index
-│   ├── services/                 # reducing_agent.py, model_manager.py, search_service.py
+│   ├── storage/                  # SQLite FTS5, Call-Graph store, file_summaries, NumPy vector index
+│   ├── services/                 # map_builder.py, funnel_agent.py, reducing_agent.py, model_manager.py, search_service.py
 │   └── tests/                    # Unit tests & live download link verifier
 ├── vscode-extension/             # Zero-dependency VS Code / Cursor extension
 ├── addin/                        # C# 2.0 Add-in for Visual Studio 2005-2013
@@ -109,6 +122,7 @@ Offline_Cpp_coding_agent/
 ## Running Verification Tests
 
 ```cmd
+python backend/tests/test_semantic_map.py -v
 python backend/tests/test_reducing_agent.py -v
 python backend/tests/test_model_manager.py -v
 python backend/tests/verify_links.py

@@ -53,6 +53,22 @@
                 </div>
 
                 <div class="card">
+                    <h3>🗺️ Карта проекта (Semantic Map)</h3>
+                    <div class="hw-summary" id="mapStatusSummary">Проверка карты проекта...</div>
+                    <div class="input-group">
+                        <div class="row-inline">
+                            <button class="btn btn-primary" id="btnBuildMap" style="flex:1">🗺️ Собрать карту (1 раз)</button>
+                            <button class="btn btn-secondary hidden" id="btnStopMap">⏹ Стоп</button>
+                        </div>
+                        <div id="mapProgressBox" class="hidden">
+                            <div id="mapProgressText" style="font-size:11.5px; color:var(--text-secondary); margin-bottom:4px;"></div>
+                            <div class="dl-progress"><div id="mapProgressFill" class="dl-progress-fill"></div></div>
+                        </div>
+                    </div>
+                    <div id="mapResultMsg" class="result-msg"></div>
+                </div>
+
+                <div class="card">
                     <h3>🧠 Модель и Железо (GGUF)</h3>
                     <div class="hw-summary" id="hwSummary">Загрузка ТТХ ПК...</div>
                     <div class="input-group">
@@ -78,9 +94,14 @@
                     <h3>🎯 Режим поиска</h3>
                     <div class="mode-selector">
                         <label class="mode-option active">
-                            <input type="radio" name="searchMode" value="reduce" checked>
+                            <input type="radio" name="searchMode" value="funnel" checked>
+                            <span class="mode-title">🗺️ Smart Funnel (~1–2 мин)</span>
+                            <span class="mode-desc">100% охват через карту → AST-скелет → сырой код + Call-Graph Rescue</span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="searchMode" value="reduce">
                             <span class="mode-title">🔄 Reducing AI (до 5 мин)</span>
-                            <span class="mode-desc">Честный проход по всем хедерам, .cpp и Rescue отсеянных</span>
+                            <span class="mode-desc">Воронка (если карта готова) или сплошной Map-Reduce + Rescue</span>
                         </label>
                         <label class="mode-option">
                             <input type="radio" name="searchMode" value="reduce_deep">

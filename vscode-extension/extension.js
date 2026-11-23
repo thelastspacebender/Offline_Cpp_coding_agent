@@ -89,6 +89,11 @@ class ChatViewProvider {
           await this._pushStatus();
         } else if (msg.type === "indexWorkspace") {
           await this.indexCurrentWorkspace();
+        } else if (msg.type === "buildMap") {
+          await this.buildSemanticMap();
+        } else if (msg.type === "cancelMap") {
+          await requestBackend("POST", "/api/map/cancel", {}, 5000);
+          await this._pushStatus();
         } else if (msg.type === "browseModel") {
           await this.selectCustomModel();
         } else if (msg.type === "selectModel") {
@@ -137,14 +142,42 @@ class ChatViewProvider {
 
   async _pushStatus() {
     try {
-      const [health, models] = await Promise.all([
+      const [health, models, mapStatus] = await Promise.all([
         requestBackend("GET", "/api/health", null, 3000),
-        requestBackend("GET", "/api/models", null, 5000)
+        requestBackend("GET", "/api/models", null, 5000),
+        requestBackend("GET", "/api/map/status", null, 3000).catch(() => null)
       ]);
-      this._post({ type: "status", health, models });
+      this._post({ type: "status", health, models, mapStatus });
     } catch (err) {
       this._post({ type: "offline", message: err.message });
     }
+  }
+
+  async buildSemanticMap() {
+    try {
+      const res = await requestBackend("POST", "/api/map/build", { force_rebuild: false }, 15000);
+      this._post({ type: "mapStarted", result: res });
+      this._pollMapProgress();
+    } catch (err) {
+      this._post({ type: "error", message: `Map build failed: ${err.message}` });
+    }
+  }
+
+  _pollMapProgress() {
+    if (this._mapTimer) clearInterval(this._mapTimer);
+    this._mapTimer = setInterval(async () => {
+      try {
+        const st = await requestBackend("GET", "/api/map/status", null, 4000);
+        this._post({ type: "mapProgress", status: st });
+        if (st.state !== "running") {
+          clearInterval(this._mapTimer);
+          this._mapTimer = null;
+        }
+      } catch {
+        clearInterval(this._mapTimer);
+        this._mapTimer = null;
+      }
+    }, 1500);
   }
 
   async indexCurrentWorkspace() {
@@ -226,6 +259,7 @@ class ChatViewProvider {
 
   <div class="row">
     <button id="btnIndex" style="flex:1">Index Workspace</button>
+    <button id="btnMap" class="secondary" style="flex:1" title="Build incremental Semantic Map (1x)">Build Map</button>
     <select id="selLang" style="width:65px">
       <option value="en">EN</option>
       <option value="ru" selected>RU</option>
@@ -240,7 +274,8 @@ class ChatViewProvider {
 
   <div class="row">
     <select id="selMode" style="flex:1">
-      <option value="reduce" selected>Reducing AI (5m)</option>
+      <option value="funnel" selected>Smart Funnel (~1-2m)</option>
+      <option value="reduce">Reducing AI (5m)</option>
       <option value="reduce_deep">Deep Reducing (10m)</option>
       <option value="fast">Fast RAG</option>
       <option value="callers">Call Graph (Callers)</option>
@@ -260,6 +295,7 @@ class ChatViewProvider {
     const lblStatus = document.getElementById("lblStatus");
     const lblStats = document.getElementById("lblStats");
     const btnIndex = document.getElementById("btnIndex");
+    const btnMap = document.getElementById("btnMap");
     const selLang = document.getElementById("selLang");
     const selModel = document.getElementById("selModel");
     const btnBrowse = document.getElementById("btnBrowse");
@@ -296,6 +332,13 @@ class ChatViewProvider {
     });
 
     btnIndex.addEventListener("click", () => vscode.postMessage({ type: "indexWorkspace" }));
+    btnMap.addEventListener("click", () => {
+      if (btnMap.dataset.running === "1") {
+        vscode.postMessage({ type: "cancelMap" });
+      } else {
+        vscode.postMessage({ type: "buildMap" });
+      }
+    });
     btnBrowse.addEventListener("click", () => vscode.postMessage({ type: "browseModel" }));
     selModel.addEventListener("change", () => {
       if (selModel.value) {
@@ -328,7 +371,14 @@ class ChatViewProvider {
       const msg = event.data;
       if (msg.type === "status") {
         lblStatus.textContent = msg.health.qwen_online ? "Online (LLM Ready)" : "Backend Online (LLM Offline)";
-        lblStats.textContent = msg.health.files_indexed + " files / " + msg.health.calls_indexed + " calls";
+        const mapPct = msg.mapStatus ? (" | Map " + msg.mapStatus.coverage_percent + "%") : "";
+        lblStats.textContent = msg.health.files_indexed + " files" + mapPct;
+        if (msg.mapStatus) {
+          btnMap.dataset.running = msg.mapStatus.state === "running" ? "1" : "0";
+          btnMap.textContent = msg.mapStatus.state === "running"
+            ? ("Stop (" + msg.mapStatus.percent + "%)")
+            : (msg.mapStatus.mapped_files > 0 ? "Update Map" : "Build Map");
+        }
         selModel.innerHTML = "";
         (msg.models.local_models || []).forEach((m) => {
           const opt = document.createElement("option");
@@ -337,6 +387,21 @@ class ChatViewProvider {
           if (m.active) opt.selected = true;
           selModel.appendChild(opt);
         });
+      } else if (msg.type === "mapStarted") {
+        btnMap.dataset.running = "1";
+        btnMap.textContent = "Stop Map";
+        appendMsg("msg-sys", "Semantic Map", (msg.result && msg.result.message) || "Building semantic map...");
+      } else if (msg.type === "mapProgress") {
+        const st = msg.status || {};
+        lblStats.textContent = st.total_files + " files | Map " + st.coverage_percent + "%";
+        if (st.state === "running") {
+          btnMap.dataset.running = "1";
+          btnMap.textContent = "Stop (" + st.percent + "%)";
+        } else {
+          btnMap.dataset.running = "0";
+          btnMap.textContent = "Update Map";
+          appendMsg("msg-sys", "Semantic Map", "Map " + st.state + ": " + st.mapped_files + "/" + st.total_files + " files (" + st.summary_entries + " entries).");
+        }
       } else if (msg.type === "offline") {
         lblStatus.textContent = "Backend Offline (run start_assistant.bat)";
       } else if (msg.type === "indexingStarted") {
@@ -397,6 +462,9 @@ function activate(context) {
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("offlineCppAgent.indexWorkspace", () => provider.indexCurrentWorkspace())
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("offlineCppAgent.buildSemanticMap", () => provider.buildSemanticMap())
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("offlineCppAgent.selectModelFile", () => provider.selectCustomModel())

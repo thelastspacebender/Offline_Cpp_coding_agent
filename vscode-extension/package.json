@@ -14,6 +14,7 @@
   "activationEvents": [
     "onView:offlineCppAgent.chatView",
     "onCommand:offlineCppAgent.indexWorkspace",
+    "onCommand:offlineCppAgent.buildSemanticMap",
     "onCommand:offlineCppAgent.askSelection",
     "onCommand:offlineCppAgent.selectModelFile"
   ],
@@ -41,6 +42,10 @@
       {
         "command": "offlineCppAgent.indexWorkspace",
         "title": "Offline C++ Agent: Index Current Workspace"
+      },
+      {
+        "command": "offlineCppAgent.buildSemanticMap",
+        "title": "Offline C++ Agent: Build Project Semantic Map"
       },
       {
         "command": "offlineCppAgent.askSelection",

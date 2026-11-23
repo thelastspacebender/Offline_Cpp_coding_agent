@@ -59,3 +59,7 @@ class ModelSelectRequest(BaseModel):
 
 class ModelDownloadRequest(BaseModel):
     model_id: str
+
+
+class MapBuildRequest(BaseModel):
+    force_rebuild: bool = False

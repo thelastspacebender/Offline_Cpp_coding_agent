@@ -9,6 +9,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnIndex = document.getElementById("btnIndex");
     const indexResultMsg = document.getElementById("indexResultMsg");
 
+    const mapStatusSummary = document.getElementById("mapStatusSummary");
+    const btnBuildMap = document.getElementById("btnBuildMap");
+    const btnStopMap = document.getElementById("btnStopMap");
+    const mapProgressBox = document.getElementById("mapProgressBox");
+    const mapProgressText = document.getElementById("mapProgressText");
+    const mapProgressFill = document.getElementById("mapProgressFill");
+    const mapResultMsg = document.getElementById("mapResultMsg");
+
     const hwSummary = document.getElementById("hwSummary");
     const modelSelect = document.getElementById("modelSelect");
     const customModelPath = document.getElementById("customModelPath");
@@ -34,8 +42,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const citationsContainer = document.getElementById("citationsContainer");
     const citationsList = document.getElementById("citationsList");
 
-    let currentMode = "reduce";
+    let currentMode = "funnel";
     let dlTimer = null;
+    let mapTimer = null;
 
     modeOptions.forEach(opt => {
         opt.addEventListener("click", () => {
@@ -222,8 +231,89 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     btnCloseCatalog.addEventListener("click", () => catalogModal.classList.add("hidden"));
 
+    async function refreshMapStatus() {
+        try {
+            const resp = await fetch("/api/map/status");
+            if (!resp.ok) return;
+            const st = await resp.json();
+            const isRunning = st.state === "running";
+            mapStatusSummary.textContent = `Покрытие: ${st.mapped_files} / ${st.total_files} файлов (${st.coverage_percent}%) | Строк карты: ${st.summary_entries} (~${st.approx_tokens} ток.)`;
+
+            if (isRunning) {
+                btnBuildMap.disabled = true;
+                btnBuildMap.textContent = "⏳ Сборка карты...";
+                btnStopMap.classList.remove("hidden");
+                mapProgressBox.classList.remove("hidden");
+                mapProgressFill.style.width = `${Math.max(2, st.percent || 0)}%`;
+                const etaStr = st.eta_seconds > 0 ? ` | ETA ~${Math.round(st.eta_seconds)}с` : "";
+                mapProgressText.textContent = `${st.processed}/${st.total_to_process} (${st.percent}%)${etaStr} — ${st.current_file || "..."}`;
+                if (!mapTimer) {
+                    mapTimer = setInterval(refreshMapStatus, 1200);
+                }
+            } else {
+                btnBuildMap.disabled = false;
+                btnBuildMap.textContent = st.mapped_files > 0 ? "🔄 Обновить карту (кэш)" : "🗺️ Собрать карту (1 раз)";
+                btnStopMap.classList.add("hidden");
+                if (mapTimer) {
+                    clearInterval(mapTimer);
+                    mapTimer = null;
+                }
+                if (st.state === "completed") {
+                    mapProgressBox.classList.add("hidden");
+                    mapResultMsg.className = "result-msg success";
+                    mapResultMsg.textContent = `✅ Карта готова (${st.mapped_files}/${st.total_files} файл., ${st.duration_seconds}с)`;
+                } else if (st.state === "cancelled") {
+                    mapProgressBox.classList.add("hidden");
+                    mapResultMsg.className = "result-msg";
+                    mapResultMsg.textContent = `⏹ Остановлено. Сохранено ${st.mapped_files}/${st.total_files} файл. (можно продолжить).`;
+                } else if (st.state === "failed") {
+                    mapProgressBox.classList.add("hidden");
+                    mapResultMsg.className = "result-msg error";
+                    mapResultMsg.textContent = `❌ Ошибка карты: ${st.error || "сбой"}`;
+                }
+            }
+        } catch {
+            if (mapStatusSummary) mapStatusSummary.textContent = "Статус карты недоступен";
+        }
+    }
+
+    btnBuildMap.addEventListener("click", async () => {
+        btnBuildMap.disabled = true;
+        mapResultMsg.className = "result-msg";
+        mapResultMsg.textContent = "⏳ Запуск инкрементальной сборки карты...";
+        try {
+            const resp = await fetch("/api/map/build", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ force_rebuild: false })
+            });
+            const data = await resp.json();
+            if (!data.started) {
+                mapResultMsg.textContent = data.message || "Сборка уже идёт.";
+            }
+            await refreshMapStatus();
+            if (!mapTimer) {
+                mapTimer = setInterval(refreshMapStatus, 1200);
+            }
+        } catch (err) {
+            btnBuildMap.disabled = false;
+            mapResultMsg.className = "result-msg error";
+            mapResultMsg.textContent = `❌ ${err.message}`;
+        }
+    });
+
+    btnStopMap.addEventListener("click", async () => {
+        try {
+            await fetch("/api/map/cancel", { method: "POST" });
+            mapResultMsg.textContent = "⏹ Остановка после текущего батча...";
+        } catch {
+            // ignore
+        }
+    });
+
     checkHealth();
     loadHardwareAndModels();
+    refreshMapStatus();
     setInterval(checkHealth, 5000);
 
     btnIndex.addEventListener("click", async () => {
@@ -250,6 +340,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 indexResultMsg.className = "result-msg success";
                 indexResultMsg.innerHTML = `✅ Успешно! Файлов: ${data.files_count}, Символов: ${data.symbols_count}, Связей: ${data.calls_count} (${data.duration_seconds} сек.)`;
                 checkHealth();
+                refreshMapStatus();
             } else {
                 indexResultMsg.className = "result-msg error";
                 indexResultMsg.textContent = `❌ Ошибка: ${data.message}`;
@@ -271,8 +362,10 @@ document.addEventListener("DOMContentLoaded", () => {
         btnSend.textContent = "Поиск...";
         welcomeBox.classList.add("hidden");
         answerContent.classList.remove("hidden");
-        if (currentMode === "reduce") {
-            answerContent.textContent = "⏳ Reducing AI (бюджет до 5 мин): многопроходный анализ заголовков, .cpp и Rescue...";
+        if (currentMode === "funnel") {
+            answerContent.textContent = "⏳ Smart Funnel (~1–2 мин): 100% обзор карты -> AST-скелет -> сырой код + Call-Graph Rescue...";
+        } else if (currentMode === "reduce") {
+            answerContent.textContent = "⏳ Reducing AI (бюджет до 5 мин): анализ карты/заголовков, .cpp и Rescue...";
         } else if (currentMode === "reduce_deep") {
             answerContent.textContent = "⏳ Deep Reducing (бюджет до 10 мин): глубокое полное сканирование проекта...";
         } else {

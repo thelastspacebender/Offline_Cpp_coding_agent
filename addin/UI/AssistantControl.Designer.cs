@@ -9,9 +9,18 @@ namespace VS2005QwenRAG.UI
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing && (components != null))
+            if (disposing)
             {
-                components.Dispose();
+                if (_mapPollTimer != null)
+                {
+                    _mapPollTimer.Stop();
+                    _mapPollTimer.Dispose();
+                    _mapPollTimer = null;
+                }
+                if (components != null)
+                {
+                    components.Dispose();
+                }
             }
             base.Dispose(disposing);
         }
@@ -25,6 +34,7 @@ namespace VS2005QwenRAG.UI
             this.btnIndex = new Button();
             this.lblSolution = new Label();
             this.comboMode = new ComboBox();
+            this.btnBuildMap = new Button();
             this.btnSelectModel = new Button();
             this.btnInsertSelection = new Button();
             this.btnClearChat = new Button();
@@ -87,9 +97,10 @@ namespace VS2005QwenRAG.UI
             this.lblSolution.Font = new Font("Segoe UI", 8.5f);
 
             this.comboMode.Location = new Point(8, 58);
-            this.comboMode.Size = new Size(192, 24);
+            this.comboMode.Size = new Size(156, 24);
             this.comboMode.DropDownStyle = ComboBoxStyle.DropDownList;
             this.comboMode.Font = new Font("Segoe UI", 8.5f);
+            this.comboMode.Items.Add("🗺️ Smart Funnel (~1-2 мин)");
             this.comboMode.Items.Add("🔄 Reducing AI (до 5 мин)");
             this.comboMode.Items.Add("🔬 Deep Reducing (до 10 мин)");
             this.comboMode.Items.Add("⚡ Быстрый RAG (LLM)");
@@ -98,20 +109,26 @@ namespace VS2005QwenRAG.UI
             this.comboMode.Items.Add("🔎 Поиск по коду (FTS5)");
             this.comboMode.SelectedIndex = 0;
 
-            this.btnSelectModel.Location = new Point(204, 57);
-            this.btnSelectModel.Size = new Size(58, 25);
+            this.btnBuildMap.Location = new Point(168, 57);
+            this.btnBuildMap.Size = new Size(58, 25);
+            this.btnBuildMap.Text = "🗺️ Карта";
+            this.btnBuildMap.Font = new Font("Segoe UI", 8f);
+            this.btnBuildMap.Click += new System.EventHandler(this.btnBuildMap_Click);
+
+            this.btnSelectModel.Location = new Point(230, 57);
+            this.btnSelectModel.Size = new Size(56, 25);
             this.btnSelectModel.Text = "📂 .gguf";
             this.btnSelectModel.Font = new Font("Segoe UI", 8f);
             this.btnSelectModel.Click += new System.EventHandler(this.btnSelectModel_Click);
 
-            this.btnInsertSelection.Location = new Point(266, 57);
-            this.btnInsertSelection.Size = new Size(110, 25);
-            this.btnInsertSelection.Text = "📋 Вставить код";
+            this.btnInsertSelection.Location = new Point(290, 57);
+            this.btnInsertSelection.Size = new Size(96, 25);
+            this.btnInsertSelection.Text = "📋 Вставить";
             this.btnInsertSelection.Font = new Font("Segoe UI", 8f);
             this.btnInsertSelection.Click += new System.EventHandler(this.btnInsertSelection_Click);
 
-            this.btnClearChat.Location = new Point(380, 57);
-            this.btnClearChat.Size = new Size(86, 25);
+            this.btnClearChat.Location = new Point(390, 57);
+            this.btnClearChat.Size = new Size(76, 25);
             this.btnClearChat.Text = "🧹 Очистить";
             this.btnClearChat.Font = new Font("Segoe UI", 8f);
             this.btnClearChat.Click += new System.EventHandler(this.btnClearChat_Click);
@@ -122,6 +139,7 @@ namespace VS2005QwenRAG.UI
             this.panelTop.Controls.Add(this.btnIndex);
             this.panelTop.Controls.Add(this.lblSolution);
             this.panelTop.Controls.Add(this.comboMode);
+            this.panelTop.Controls.Add(this.btnBuildMap);
             this.panelTop.Controls.Add(this.btnSelectModel);
             this.panelTop.Controls.Add(this.btnInsertSelection);
             this.panelTop.Controls.Add(this.btnClearChat);
@@ -223,6 +241,7 @@ namespace VS2005QwenRAG.UI
         private Button btnCheckServer;
         private ComboBox comboLang;
         private ComboBox comboMode;
+        private Button btnBuildMap;
         private Button btnSelectModel;
         private Button btnInsertSelection;
         private Button btnClearChat;

@@ -539,7 +539,7 @@ class ReducingAgent:
 
     @staticmethod
     def _extract_exclusions(question: str) -> Set[str]:
-        """Detects identifiers explicitly excluded by the user ('игнорируй AtlasTesting', 'ignore Foo')."""
+        """Detects identifiers explicitly excluded by the user ('игнорируй SampleTest', 'ignore Foo')."""
         excluded: Set[str] = set()
         for m in re.finditer(
             r'(?:игнорируй|исключи|кроме|не\s+учитывай|не\s+смотри|ignore|exclude|skip)\b([^\n.;!?]{0,90})',
@@ -631,7 +631,7 @@ class ReducingAgent:
         excluded = excluded or set()
         q_idents = self._extract_question_identifiers(question, excluded)
         sys_p = (
-            "Extract 4 to 10 concise technical C/C++ search tokens (exact identifiers, verb+noun stems like SetExp, CalcExp, AutoExp, "
+            "Extract 4 to 10 concise technical C/C++ search tokens (exact identifiers, verb+noun stems like SetParam, CalcRate, AutoTune, "
             "and English domain words) from the user question.\n"
             "Do NOT output generic phrases like 'function calls', 'thread blocking', 'variable declaration', 'infinite loop'.\n"
             "Do NOT output any file/symbol the user asked to ignore.\n"
@@ -1410,7 +1410,7 @@ class ReducingAgent:
         for ev in pass1_evidences + pass2_evidences:
             found_symbols.update(ev.symbols)
 
-        # Automatically extract called method/function names (e.g. SetExpTime) from retrieved code blocks
+        # Automatically extract called method/function names (e.g. SetTargetValue) from retrieved code blocks
         called_in_evidence = self._extract_called_identifiers(pass2_evidences or pass2_seed_hits, file_encodings)
         missing_symbols.update(called_in_evidence)
         missing_symbols.update(self._extract_question_identifiers(question, excluded_stems))

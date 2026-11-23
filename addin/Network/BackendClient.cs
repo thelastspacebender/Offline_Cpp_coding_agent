@@ -12,6 +12,7 @@ namespace VS2005QwenRAG.Network
     public delegate void IndexCallback(IndexResult result);
     public delegate void QueryCallback(QueryResult result);
     public delegate void ModelSwitchCallback(bool success, string message);
+    public delegate void MapStatusCallback(bool ok, string state, int mappedFiles, int totalFiles, double percent, string message);
 
     /// <summary>
     /// Thread-safe HTTP Client for communication with local Python backend.
@@ -189,6 +190,127 @@ namespace VS2005QwenRAG.Network
                 if (callback != null)
                 {
                     callback(ok, msg);
+                }
+            });
+        }
+
+        public void StartMapBuildAsync(MapStatusCallback callback)
+        {
+            ThreadPool.QueueUserWorkItem(delegate(object stateObj)
+            {
+                bool ok = false;
+                string st = "idle";
+                int mapped = 0;
+                int total = 0;
+                double pct = 0.0;
+                string msg = "";
+                try
+                {
+                    string responseText = SendPostRequest(_baseUrl + "/api/map/build", "{\"force_rebuild\":false}", 15000);
+                    Dictionary<string, object> dict = MiniJson.Deserialize(responseText) as Dictionary<string, object>;
+                    if (dict != null)
+                    {
+                        ok = true;
+                        if (dict.ContainsKey("message")) msg = Convert.ToString(dict["message"]);
+                        Dictionary<string, object> statusDict = dict.ContainsKey("status") ? (dict["status"] as Dictionary<string, object>) : null;
+                        if (statusDict != null)
+                        {
+                            if (statusDict.ContainsKey("state")) st = Convert.ToString(statusDict["state"]);
+                            if (statusDict.ContainsKey("mapped_files")) mapped = Convert.ToInt32(statusDict["mapped_files"]);
+                            if (statusDict.ContainsKey("total_files")) total = Convert.ToInt32(statusDict["total_files"]);
+                            if (statusDict.ContainsKey("percent")) pct = Convert.ToDouble(statusDict["percent"]);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    msg = ex.Message;
+                }
+
+                if (callback != null)
+                {
+                    callback(ok, st, mapped, total, pct, msg);
+                }
+            });
+        }
+
+        public void CancelMapBuildAsync(MapStatusCallback callback)
+        {
+            ThreadPool.QueueUserWorkItem(delegate(object stateObj)
+            {
+                bool ok = false;
+                string st = "cancelled";
+                int mapped = 0;
+                int total = 0;
+                double pct = 0.0;
+                string msg = "";
+                try
+                {
+                    string responseText = SendPostRequest(_baseUrl + "/api/map/cancel", "{}", 10000);
+                    Dictionary<string, object> dict = MiniJson.Deserialize(responseText) as Dictionary<string, object>;
+                    if (dict != null)
+                    {
+                        ok = true;
+                        if (dict.ContainsKey("message")) msg = Convert.ToString(dict["message"]);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    msg = ex.Message;
+                }
+
+                if (callback != null)
+                {
+                    callback(ok, st, mapped, total, pct, msg);
+                }
+            });
+        }
+
+        public void GetMapStatusAsync(MapStatusCallback callback)
+        {
+            ThreadPool.QueueUserWorkItem(delegate(object stateObj)
+            {
+                bool ok = false;
+                string st = "idle";
+                int mapped = 0;
+                int total = 0;
+                double pct = 0.0;
+                string msg = "";
+                try
+                {
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(_baseUrl + "/api/map/status");
+                    req.Timeout = 4000;
+                    req.Method = "GET";
+                    string responseText;
+                    using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                        {
+                            responseText = sr.ReadToEnd();
+                        }
+                    }
+                    Dictionary<string, object> dict = MiniJson.Deserialize(responseText) as Dictionary<string, object>;
+                    if (dict != null)
+                    {
+                        ok = true;
+                        if (dict.ContainsKey("state")) st = Convert.ToString(dict["state"]);
+                        if (dict.ContainsKey("mapped_files")) mapped = Convert.ToInt32(dict["mapped_files"]);
+                        if (dict.ContainsKey("total_files")) total = Convert.ToInt32(dict["total_files"]);
+                        if (dict.ContainsKey("percent")) pct = Convert.ToDouble(dict["percent"]);
+                        if (dict.ContainsKey("current_file")) msg = Convert.ToString(dict["current_file"]);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    msg = ex.Message;
+                }
+
+                if (callback != null)
+                {
+                    callback(ok, st, mapped, total, pct, msg);
                 }
             });
         }

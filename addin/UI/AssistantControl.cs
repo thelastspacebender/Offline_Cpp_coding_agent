@@ -21,6 +21,8 @@ namespace VS2005QwenRAG.UI
         private DteNavigator _navigator;
         private BackendClient _client;
         private string _currentLang = "ru";
+        private bool _mapBuilding = false;
+        private System.Windows.Forms.Timer _mapPollTimer = null;
 
         public DteNavigator Navigator
         {
@@ -179,6 +181,8 @@ namespace VS2005QwenRAG.UI
                 listCitations.Columns[1].Text = "שורה";
                 listCitations.Columns[2].Text = "סמל / הקשר";
 
+                btnBuildMap.Text = _mapBuilding ? "⏹ עצור" : "🗺️ מפה";
+                comboMode.Items.Add("🗺️ Smart Funnel (~1-2 דק')");
                 comboMode.Items.Add("🔄 Reducing AI (עד 5 דק')");
                 comboMode.Items.Add("🔬 Deep Reducing (עד 10 דק')");
                 comboMode.Items.Add("⚡ RAG מהיר (Qwen 7B)");
@@ -190,8 +194,9 @@ namespace VS2005QwenRAG.UI
             {
                 btnCheckServer.Text = "Check";
                 btnIndex.Text = "🔄 Index Solution";
-                btnInsertSelection.Text = "📋 Insert Code";
-                btnClearChat.Text = "🧹 Clear Chat";
+                btnBuildMap.Text = _mapBuilding ? "⏹ Stop" : "🗺️ Map";
+                btnInsertSelection.Text = "📋 Insert";
+                btnClearChat.Text = "🧹 Clear";
                 lblPrompt.Text = "Chat Message (Enter or Ctrl+Enter to send):";
                 btnAsk.Text = "Send";
                 lblCitations.Text = " 📍 Code Citations (Double click to navigate):";
@@ -200,6 +205,7 @@ namespace VS2005QwenRAG.UI
                 listCitations.Columns[1].Text = "Line";
                 listCitations.Columns[2].Text = "Symbol / Context";
 
+                comboMode.Items.Add("🗺️ Smart Funnel (~1-2m)");
                 comboMode.Items.Add("🔄 Reducing AI (up to 5m)");
                 comboMode.Items.Add("🔬 Deep Reducing (up to 10m)");
                 comboMode.Items.Add("⚡ Fast RAG (Qwen 7B)");
@@ -211,8 +217,9 @@ namespace VS2005QwenRAG.UI
             {
                 btnCheckServer.Text = "Проверить";
                 btnIndex.Text = "🔄 Индексировать";
-                btnInsertSelection.Text = "📋 Вставить код";
-                btnClearChat.Text = "🧹 Очистить чат";
+                btnBuildMap.Text = _mapBuilding ? "⏹ Стоп" : "🗺️ Карта";
+                btnInsertSelection.Text = "📋 Вставить";
+                btnClearChat.Text = "🧹 Очистить";
                 lblPrompt.Text = "Сообщение чата (Enter или Ctrl+Enter для отправки):";
                 btnAsk.Text = "Отправить";
                 lblCitations.Text = " 📍 Ссылки на код (Двойной клик — переход к строке):";
@@ -221,6 +228,7 @@ namespace VS2005QwenRAG.UI
                 listCitations.Columns[1].Text = "Строка";
                 listCitations.Columns[2].Text = "Символ / Сигнатура / Контекст";
 
+                comboMode.Items.Add("🗺️ Smart Funnel (~1-2 мин)");
                 comboMode.Items.Add("🔄 Reducing AI (до 5 мин)");
                 comboMode.Items.Add("🔬 Deep Reducing (до 10 мин)");
                 comboMode.Items.Add("⚡ Быстрый RAG (Qwen 7B)");
@@ -264,6 +272,93 @@ namespace VS2005QwenRAG.UI
             lblStatus.Text = "● Сервер: Проверка...";
             lblStatus.ForeColor = Color.DarkOrange;
             CheckBackendConnection();
+        }
+
+        private void btnBuildMap_Click(object sender, EventArgs e)
+        {
+            if (_mapBuilding)
+            {
+                _client.CancelMapBuildAsync(delegate(bool ok, string st, int mapped, int total, double pct, string msg)
+                {
+                    RunOnUIThread(delegate()
+                    {
+                        AppendChatMessage("🗺️ Карта проекта", ok ? msg : ("Ошибка остановки: " + msg), Color.DarkSlateBlue);
+                    });
+                });
+                return;
+            }
+
+            _mapBuilding = true;
+            btnBuildMap.Text = (_currentLang == "en") ? "⏹ Stop" : "⏹ Стоп";
+            progressBar.Visible = true;
+            AppendChatMessage(
+                "🗺️ Карта проекта",
+                "Запущена инкрементальная сборка семантической карты проекта (кэш по mtime, можно остановить в любой момент)...",
+                Color.DarkSlateBlue
+            );
+
+            _client.StartMapBuildAsync(delegate(bool ok, string st, int mapped, int total, double pct, string msg)
+            {
+                RunOnUIThread(delegate()
+                {
+                    if (!ok)
+                    {
+                        _mapBuilding = false;
+                        progressBar.Visible = false;
+                        btnBuildMap.Text = (_currentLang == "en") ? "🗺️ Map" : "🗺️ Карта";
+                        AppendChatMessage("❌ Ошибка карты", msg, Color.Crimson);
+                        return;
+                    }
+                    StartMapPolling();
+                });
+            });
+        }
+
+        private void StartMapPolling()
+        {
+            if (_mapPollTimer == null)
+            {
+                _mapPollTimer = new System.Windows.Forms.Timer();
+                _mapPollTimer.Interval = 2500;
+                _mapPollTimer.Tick += new EventHandler(MapPollTimer_Tick);
+            }
+            _mapPollTimer.Start();
+        }
+
+        private void MapPollTimer_Tick(object sender, EventArgs e)
+        {
+            _client.GetMapStatusAsync(delegate(bool ok, string st, int mapped, int total, double pct, string msg)
+            {
+                RunOnUIThread(delegate()
+                {
+                    if (!ok)
+                    {
+                        if (_mapPollTimer != null) _mapPollTimer.Stop();
+                        _mapBuilding = false;
+                        progressBar.Visible = false;
+                        btnBuildMap.Text = (_currentLang == "en") ? "🗺️ Map" : "🗺️ Карта";
+                        return;
+                    }
+
+                    if (st == "running")
+                    {
+                        lblSolution.Text = string.Format("🗺️ Карта: {0}/{1} ({2:F0}%) {3}", mapped, total, pct, msg);
+                    }
+                    else
+                    {
+                        if (_mapPollTimer != null) _mapPollTimer.Stop();
+                        _mapBuilding = false;
+                        progressBar.Visible = false;
+                        btnBuildMap.Text = (_currentLang == "en") ? "🗺️ Map" : "🗺️ Карта";
+                        UpdateSolutionInfo();
+                        AppendChatMessage(
+                            st == "completed" ? "✅ Карта проекта готова" : "🗺️ Статус карты",
+                            string.Format("Статус: {0} | Покрытие: {1}/{2} файлов ({3:F1}%)", st, mapped, total, pct),
+                            st == "completed" ? Color.ForestGreen : Color.DarkSlateBlue
+                        );
+                    }
+                });
+            });
         }
 
         private void btnSelectModel_Click(object sender, EventArgs e)
@@ -390,15 +485,17 @@ namespace VS2005QwenRAG.UI
             string userLabel = (_currentLang == "he") ? "👤 אתה" : ((_currentLang == "en") ? "👤 You" : "👤 Вы");
             AppendChatMessage(userLabel, question, Color.FromArgb(0, 102, 204));
 
-            string mode = "reduce";
+            string mode = "funnel";
             switch (comboMode.SelectedIndex)
             {
-                case 1: mode = "reduce_deep"; break;
-                case 2: mode = "fast"; break;
-                case 3: mode = "callers"; break;
-                case 4: mode = "definition"; break;
-                case 5: mode = "grep"; break;
-                default: mode = "reduce"; break;
+                case 0: mode = "funnel"; break;
+                case 1: mode = "reduce"; break;
+                case 2: mode = "reduce_deep"; break;
+                case 3: mode = "fast"; break;
+                case 4: mode = "callers"; break;
+                case 5: mode = "definition"; break;
+                case 6: mode = "grep"; break;
+                default: mode = "funnel"; break;
             }
 
             string currentFile = string.Empty;

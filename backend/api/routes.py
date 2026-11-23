@@ -7,7 +7,8 @@ from fastapi import APIRouter
 from .schemas import (
     IndexRequest, IndexResponse,
     QueryRequest, QueryResponse, CitationSchema,
-    HealthResponse, ModelSelectRequest, ModelDownloadRequest
+    HealthResponse, ModelSelectRequest, ModelDownloadRequest,
+    MapBuildRequest
 )
 from ..storage.sqlite_db import DatabaseManager
 from ..storage.graph_store import GraphStore
@@ -147,4 +148,19 @@ def download_model(req: ModelDownloadRequest):
 @router.get("/models/download/status")
 def download_model_status():
     return model_manager.get_download_status()
+
+
+@router.get("/map/status")
+def get_map_status():
+    return search_service.map_builder.get_status()
+
+
+@router.post("/map/build")
+def start_map_build(req: MapBuildRequest = MapBuildRequest()):
+    return search_service.map_builder.start_build(force_rebuild=req.force_rebuild)
+
+
+@router.post("/map/cancel")
+def cancel_map_build():
+    return search_service.map_builder.cancel_build()
 
