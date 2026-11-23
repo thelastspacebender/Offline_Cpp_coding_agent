@@ -44,7 +44,7 @@ class MockQwenService:
         self.raw_calls.append((system_prompt, user_prompt))
 
         # Pass 0 keyword extraction
-        if "keywords" in system_prompt and "Extract 5 to 12" in system_prompt:
+        if "keywords" in system_prompt and ("Extract 4 to 10" in system_prompt or "Extract 5 to 12" in system_prompt):
             return json.dumps({"keywords": ["SensorReader", "AcquireData"]})
 
         # Pass 4 Reduce
@@ -327,6 +327,55 @@ class TestReducingAgent(unittest.TestCase):
         final_prompt = qwen.final_calls[0][1]
         self.assertIn("Controller.cpp", final_prompt)
         self.assertIn("SetTargetValue", final_prompt)
+
+    def test_exclusions_and_giant_file_deprioritization(self):
+        self._write_file("TestMenu/DummyMenu.cpp", (
+            "void DummyMenuHandler() {\n"
+            "    // exposure time test menu option\n"
+            "    SetExposureDuration(10);\n"
+            "}\n"
+        ))
+        giant_lines = ["void AutogenMath(double x) {"]
+        for i in range(1800):
+            giant_lines.append(f"    double k{i} = x * {i}.0; // exposure calculation table")
+        giant_lines.append("}")
+        self._write_file("Autogen/GiantMath.cpp", "\n".join(giant_lines))
+        self._write_file("Core/ExposureMgr.h", (
+            "class CExposureMgr {\n"
+            "public:\n"
+            "    void SetExposureDuration(int ms);\n"
+            "};\n"
+        ))
+        self._write_file("Core/ExposureMgr.cpp", (
+            '#include "ExposureMgr.h"\n'
+            "void CExposureMgr::SetExposureDuration(int ms) {\n"
+            "    while (ms < 0) { /* guard */ break; }\n"
+            "}\n"
+        ))
+
+        class SelectiveMock(MockQwenService):
+            def generate_raw(self, system_prompt, user_prompt, temperature=0.0, max_tokens=256, timeout=45.0, stop=None):
+                if "Extract 4 to 10" in system_prompt or "Extract 5 to 12" in system_prompt:
+                    return json.dumps({"keywords": ["SetExposureDuration", "ExposureMgr"]})
+                if "missing_symbols" in system_prompt and "ExposureMgr.cpp" in user_prompt:
+                    return json.dumps({
+                        "relevant": [{"file": "Core/ExposureMgr.cpp", "lines": [2, 4], "symbols": ["CExposureMgr::SetExposureDuration"], "reason": "real impl"}],
+                        "missing_symbols": []
+                    })
+                if "ExposureMgr.h" in user_prompt and "pass1" not in system_prompt:
+                    return json.dumps({
+                        "relevant": [{"file": "Core/ExposureMgr.h", "lines": [1, 4], "symbols": ["CExposureMgr", "SetExposureDuration"], "reason": "decl"}]
+                    })
+                return json.dumps({"relevant": []})
+
+        qwen = SelectiveMock()
+        agent = self._build_agent(qwen)
+        res = agent.run("Find SetExposureDuration implementation (ignore DummyMenu)", budget_sec=120, deep=True)
+
+        self.assertTrue(res.success)
+        final_prompt = qwen.final_calls[0][1]
+        self.assertIn("ExposureMgr.cpp", final_prompt)
+        self.assertNotIn("DummyMenu.cpp", final_prompt)
 
 
 if __name__ == "__main__":

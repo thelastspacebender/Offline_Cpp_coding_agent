@@ -42,6 +42,18 @@ CPP_CONTROL_WORDS = {
     "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
     "strlen", "strcpy", "strcmp", "ASSERT", "TRACE", "VERIFY"
 }
+GENERIC_NOISE_WORDS = {
+    "time", "code", "file", "files", "function", "functions", "method", "methods",
+    "class", "classes", "struct", "variable", "variables", "thread", "threads",
+    "loop", "while", "for", "wait", "waiting", "sleep", "blocking", "block",
+    "infinite", "automatic", "auto", "selection", "process", "calls", "call",
+    "declaration", "implementation", "recalculation", "parameter", "parameters",
+    "find", "show", "where", "how", "what", "when", "ignore", "exclude"
+}
+STANDARD_VENDOR_HEADERS = {
+    "pthread.h", "sched.h", "semaphore.h", "fci.h", "fdi.h",
+    "zlib.h", "zconf.h", "stdint.h", "inttypes.h", "resource.h", "stdafx.h"
+}
 
 
 @dataclass
@@ -525,36 +537,122 @@ class ReducingAgent:
                     called.add(tok)
         return called
 
-    def _find_symbol_boost_files(self, keywords: List[str]) -> Set[str]:
-        """Finds file_paths containing indexed symbols matching keywords (used only for queue ordering & fallback seeding)."""
+    @staticmethod
+    def _extract_exclusions(question: str) -> Set[str]:
+        """Detects identifiers explicitly excluded by the user ('игнорируй AtlasTesting', 'ignore Foo')."""
+        excluded: Set[str] = set()
+        for m in re.finditer(
+            r'(?:игнорируй|исключи|кроме|не\s+учитывай|не\s+смотри|ignore|exclude|skip)\b([^\n.;!?]{0,90})',
+            question,
+            re.IGNORECASE
+        ):
+            tail = m.group(1)
+            for tok in re.findall(r'[A-Za-z_][A-Za-z0-9_.]{2,}', tail):
+                stem = os.path.splitext(tok)[0].lower()
+                if stem not in GENERIC_NOISE_WORDS:
+                    excluded.add(stem)
+        return excluded
+
+    @staticmethod
+    def _extract_question_identifiers(question: str, excluded: Set[str]) -> List[str]:
+        """Extracts concrete C/C++ CamelCase or snake_case identifiers directly mentioned in the question."""
+        found: List[str] = []
+        for tok in re.findall(r'\b[A-Za-z_][A-Za-z0-9_]{2,}\b', question):
+            low = tok.lower()
+            if low in GENERIC_NOISE_WORDS or low in excluded:
+                continue
+            is_ident = (
+                re.search(r'[a-z][A-Z]', tok) is not None
+                or '_' in tok
+                or tok.isupper()
+                or tok.startswith(('C', 'm_', 'f', 'p', 'i', 'b', 'w')) and len(tok) >= 4
+            )
+            if is_ident and tok not in found:
+                found.append(tok)
+        return found
+
+    def _find_macro_heavy_files(self) -> Set[str]:
+        """Identifies constant/resource-only header files (>80% macros, >=20 symbols) so user class headers scan first."""
+        heavy: Set[str] = set()
+        with self.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT file_path,
+                       COUNT(*) as total_cnt,
+                       SUM(CASE WHEN kind = 'macro' THEN 1 ELSE 0 END) as macro_cnt
+                FROM symbols
+                GROUP BY file_path
+                HAVING total_cnt >= 20 AND (macro_cnt * 1.0 / total_cnt) >= 0.80;
+            """)
+            for row in cur.fetchall():
+                heavy.add(row[0])
+        return heavy
+
+    def _find_symbol_boost_files(self, keywords: List[str], header_records: Optional[List[Dict[str, Any]]] = None) -> Set[str]:
+        """Finds file_paths (plus paired .h stems) containing indexed symbols matching specific keywords."""
         matched: Set[str] = set()
-        clean_kws = [k.strip() for k in keywords if re.match(r'^[A-Za-z0-9_]{3,}$', k.strip())]
+        clean_kws = [
+            k.strip() for k in keywords
+            if re.match(r'^[A-Za-z0-9_]{3,}$', k.strip()) and k.strip().lower() not in GENERIC_NOISE_WORDS
+        ]
         if not clean_kws:
             return matched
+
+        matched_stems: Set[str] = set()
         with self.db.get_connection() as conn:
             cur = conn.cursor()
             for kw in clean_kws[:12]:
                 cur.execute("SELECT DISTINCT file_path FROM symbols WHERE name LIKE ? LIMIT 15;", (f"%{kw}%",))
                 for row in cur.fetchall():
-                    matched.add(row[0])
+                    fp = row[0]
+                    matched.add(fp)
+                    matched_stems.add(os.path.splitext(os.path.basename(fp))[0].lower())
+                # Also look up callers/callees in call_relations for exact identifiers
+                if re.search(r'[a-z][A-Z]|_', kw):
+                    cur.execute(
+                        "SELECT DISTINCT file_path FROM call_relations WHERE callee_name LIKE ? OR caller_symbol LIKE ? LIMIT 15;",
+                        (f"%{kw}%", f"%{kw}%")
+                    )
+                    for row in cur.fetchall():
+                        fp = row[0]
+                        matched.add(fp)
+                        matched_stems.add(os.path.splitext(os.path.basename(fp))[0].lower())
+
+        # Propagate boost from .cpp -> paired .h so header prototypes aren't missed
+        if header_records and matched_stems:
+            for rec in header_records:
+                h_stem = os.path.splitext(os.path.basename(rec["file_path"]))[0].lower()
+                if h_stem in matched_stems:
+                    matched.add(rec["file_path"])
         return matched
 
-    def _pass0_extract_keywords(self, question: str, timeout: float = 20.0) -> List[str]:
+    def _pass0_extract_keywords(self, question: str, timeout: float = 20.0, excluded: Optional[Set[str]] = None) -> List[str]:
         """Fast (~2-4s) keyword expansion used ONLY to order Pass 1 queue priority."""
+        excluded = excluded or set()
+        q_idents = self._extract_question_identifiers(question, excluded)
         sys_p = (
-            "Extract 5 to 12 concise technical search keywords (C/C++ identifier fragments, domain nouns, "
-            "and their English equivalents if question is non-English) from the user question. "
+            "Extract 4 to 10 concise technical C/C++ search tokens (exact identifiers, verb+noun stems like SetExp, CalcExp, AutoExp, "
+            "and English domain words) from the user question.\n"
+            "Do NOT output generic phrases like 'function calls', 'thread blocking', 'variable declaration', 'infinite loop'.\n"
+            "Do NOT output any file/symbol the user asked to ignore.\n"
             "Respond ONLY with JSON: {\"keywords\": [\"kw1\", \"kw2\"]}"
         )
         raw = self.qwen.generate_raw(sys_p, f"Question: {question}", temperature=0.0, max_tokens=120, timeout=timeout)
         parsed = _parse_llm_json(raw)
-        kws = [str(k).strip() for k in parsed.get("keywords", []) if len(str(k).strip()) > 1]
 
-        raw_words = re.findall(r'[A-Za-z0-9_]+|[А-Яа-яЁё]+', question)
-        for w in raw_words:
-            if len(w) > 2 and w not in kws:
+        kws: List[str] = list(q_idents)
+        for item in parsed.get("keywords", []):
+            for token in re.findall(r'[A-Za-z0-9_]{3,}', str(item)):
+                low = token.lower()
+                if low not in GENERIC_NOISE_WORDS and low not in excluded and token not in kws:
+                    kws.append(token)
+
+        for w in re.findall(r'[A-Za-z0-9_]+', question):
+            low = w.lower()
+            if len(w) > 2 and low not in GENERIC_NOISE_WORDS and low not in excluded and w not in kws:
                 kws.append(w)
-        return list(dict.fromkeys(kws))[:18]
+
+        return kws[:16]
 
     def _scan_batch_map(
         self,
@@ -1097,17 +1195,26 @@ class ReducingAgent:
             base_to_fulls.setdefault(os.path.basename(fp).lower(), []).append(fp)
 
         # ---------------- PASS 0: Priority Ordering Only ----------------
+        excluded_stems = self._extract_exclusions(question)
         log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⏳ [Pass 0] Извлечение ключевых терминов вопроса через LLM...")
-        keywords = self._pass0_extract_keywords(question, timeout=budget.batch_timeout(20.0))
-        bm25_hits = self.fts.search_bm25(question, limit=25, custom_tokens=keywords or None)
-        bm25_boost_files = {m["file_path"] for m in bm25_hits}
-        sym_boost_files = self._find_symbol_boost_files(keywords)
-        log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова для порядка очереди: {keywords[:12]}")
-
-        # ---------------- PASS 1: All Headers + Standalone Outlines ----------------
+        keywords = self._pass0_extract_keywords(question, timeout=budget.batch_timeout(20.0), excluded=excluded_stems)
         header_records = [f for f in all_files if os.path.splitext(f["file_path"])[1].lower() in HEADER_EXTS]
         source_records = [f for f in all_files if os.path.splitext(f["file_path"])[1].lower() in SOURCE_EXTS]
 
+        bm25_hits_raw = self.fts.search_bm25(question, limit=30, custom_tokens=keywords or None)
+        bm25_hits = [
+            m for m in bm25_hits_raw
+            if os.path.splitext(os.path.basename(m["file_path"]))[0].lower() not in excluded_stems
+        ] or bm25_hits_raw
+        bm25_boost_files = {m["file_path"] for m in bm25_hits}
+        sym_boost_files = self._find_symbol_boost_files(keywords, header_records=header_records)
+        macro_heavy_files = self._find_macro_heavy_files()
+        log_agent_line(
+            f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова: {keywords[:12]}"
+            + (f" | Исключения: {sorted(excluded_stems)}" if excluded_stems else "")
+        )
+
+        # ---------------- PASS 1: All Headers + Standalone Outlines ----------------
         header_stems = {os.path.splitext(os.path.basename(h["file_path"]))[0].lower() for h in header_records}
         standalone_sources = [
             s for s in source_records
@@ -1122,38 +1229,48 @@ class ReducingAgent:
             pass1_targets = list(header_records)
             use_outlines_for_sources = True
 
-        # Queue prioritization (ALL targets remain in queue; only order changes)
+        # Queue prioritization: user project headers & exact identifier matches FIRST; SDK/macro/giant files LAST
         cur_stem = os.path.splitext(os.path.basename(current_file))[0].lower() if current_file else ""
-        kw_lowers = [k.lower() for k in keywords if len(k) >= 2]
+        kw_lowers = [k.lower() for k in keywords if len(k) >= 3]
 
-        def target_priority(rec: Dict[str, Any]) -> Tuple[int, str]:
+        def target_priority(rec: Dict[str, Any]) -> Tuple[int, int, int, str]:
             fp = rec["file_path"]
             base = os.path.basename(fp).lower()
             stem = os.path.splitext(base)[0]
+            lcount = int(rec.get("line_count") or 0)
             if current_file and (fp == current_file or (cur_stem and stem == cur_stem)):
-                return (0, fp)
+                return (0, 0, lcount, fp)
+            if stem in excluded_stems:
+                return (4, 0, lcount, fp)
+            if base in STANDARD_VENDOR_HEADERS or fp in macro_heavy_files or lcount > 1500:
+                # Still keep in queue, just after concise project files (unless directly matched by symbol)
+                if fp in sym_boost_files:
+                    return (1, 900, lcount, fp)
+                return (3, 0, lcount, fp)
+
             score = 0
             if fp in sym_boost_files:
-                score += 6
+                score += 8
             if fp in bm25_boost_files:
-                score += 5
+                score += 4
             if any(kw in base for kw in kw_lowers):
                 score += 4
             if score > 0:
-                return (1, f"{999 - score:03d}_{fp}")
-            return (2, fp)
+                return (1, 999 - score, lcount, fp)
+            return (2, 0, lcount, fp)
 
         pass1_targets.sort(key=target_priority)
         standalone_sources.sort(key=target_priority)
 
         pass1_chunks: List[CodeChunk] = []
-        max_chunks_p1 = None if deep else 6
+        max_chunks_p1 = 4
         for rec in pass1_targets:
             fp = rec["file_path"]
             is_hdr = os.path.splitext(fp)[1].lower() in HEADER_EXTS
+            per_file_cap = 6 if (deep and fp in sym_boost_files) else (2 if fp in macro_heavy_files else max_chunks_p1)
             pass1_chunks.extend(self._chunk_file(
                 fp, self._make_display_path(fp), rec["encoding"],
-                max_lines=320, overlap=15, max_chunks=max_chunks_p1, compact_headers=is_hdr
+                max_lines=320, overlap=15, max_chunks=per_file_cap, compact_headers=is_hdr
             ))
 
         if use_outlines_for_sources:
@@ -1194,7 +1311,20 @@ class ReducingAgent:
         # Ensure Pass 2 always has seeds even if Pass 1 hit time limit or returned few matches
         pass2_seed_hits = list(pass1_evidences)
         if len(pass2_seed_hits) < 2:
-            log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔎 [Pass 1->2 Seed] Дополнение кандидатов из BM25 и таблицы символов...")
+            log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔎 [Pass 1->2 Seed] Дополнение кандидатов из BM25, символов и графа вызовов...")
+            for fp in sorted(sym_boost_files):
+                if os.path.splitext(os.path.basename(fp))[0].lower() in excluded_stems:
+                    continue
+                pass2_seed_hits.append(EvidenceItem(
+                    file_path=fp,
+                    display_path=self._make_display_path(fp),
+                    line_start=1,
+                    line_end=1,
+                    symbols=[k for k in keywords[:5]],
+                    reason="Direct symbol/call-graph match",
+                    source_pass="symbol_seed",
+                    score=3
+                ))
             for sn in bm25_hits[:10]:
                 fp = sn["file_path"]
                 pass2_seed_hits.append(EvidenceItem(
@@ -1209,6 +1339,8 @@ class ReducingAgent:
                 ))
             fuzzy_defs, _ = self.graph.fuzzy_search(keywords[:10], limit=8)
             for fd in fuzzy_defs:
+                if os.path.splitext(os.path.basename(fd.file_path))[0].lower() in excluded_stems:
+                    continue
                 pass2_seed_hits.append(EvidenceItem(
                     file_path=fd.file_path,
                     display_path=self._make_display_path(fd.file_path),
@@ -1217,13 +1349,23 @@ class ReducingAgent:
                     symbols=[fd.name],
                     reason="Symbol Pass 2 seed",
                     source_pass="symbol_seed",
-                    score=1
+                    score=2
                 ))
 
         # ---------------- PASS 2: Map Headers -> .cpp/.c ----------------
         pass2_targets = self._map_headers_to_sources(pass2_seed_hits, all_files, current_file, deep=deep)
+        # Keep excluded files and giant (>2000 line) files out of the front of Pass 2 queue
+        pass2_targets = [
+            rec for rec in pass2_targets
+            if os.path.splitext(os.path.basename(rec["file_path"]))[0].lower() not in excluded_stems
+        ] or pass2_targets
+        pass2_targets.sort(key=lambda r: (
+            0 if r["file_path"] in sym_boost_files else 1,
+            1 if int(r.get("line_count") or 0) > 2000 else 0,
+            int(r.get("line_count") or 0)
+        ))
         pass2_chunks: List[CodeChunk] = []
-        max_chunks_p2 = None if deep else 6
+        max_chunks_p2 = 6
         scanned_pass2_files: Set[str] = set()
 
         for rec in pass2_targets:
@@ -1271,11 +1413,16 @@ class ReducingAgent:
         # Automatically extract called method/function names (e.g. SetExpTime) from retrieved code blocks
         called_in_evidence = self._extract_called_identifiers(pass2_evidences or pass2_seed_hits, file_encodings)
         missing_symbols.update(called_in_evidence)
+        missing_symbols.update(self._extract_question_identifiers(question, excluded_stems))
 
         already_rescued: Set[str] = set()
         rescue_targets = self._find_rescue_targets(
             missing_symbols, found_symbols, scanned_pass2_files, all_files, already_rescued, deep=deep
         )
+        rescue_targets = [
+            rec for rec in rescue_targets
+            if os.path.splitext(os.path.basename(rec["file_path"]))[0].lower() not in excluded_stems
+        ] or rescue_targets
 
         pass3_evidences: List[EvidenceItem] = []
         pass3_files_scanned = 0
@@ -1355,7 +1502,7 @@ class ReducingAgent:
         all_evidences = pass1_evidences + pass2_evidences + pass3_evidences
         if not all_evidences:
             log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⚠️ [Reducing] Карты дали 0 совпадений, резервный подбор через BM25.")
-            for sn in self.fts.search_bm25(question, limit=10, custom_tokens=keywords or None):
+            for sn in bm25_hits[:10]:
                 fp = sn["file_path"]
                 all_evidences.append(EvidenceItem(
                     file_path=fp,
