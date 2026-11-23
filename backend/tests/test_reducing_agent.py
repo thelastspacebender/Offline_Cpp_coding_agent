@@ -279,6 +279,55 @@ class TestReducingAgent(unittest.TestCase):
         # Should NOT explode with all 15 Dummy*.cpp files
         self.assertEqual(len(mapped), 0)
 
+    def test_pass1_empty_seeds_pass2_and_rescues_called_method(self):
+        self._write_file("App/Runner.cpp", (
+            '#include "../Hw/Controller.h"\n'
+            "void RunAutoSequence(CController *pCtrl, float val) {\n"
+            "    // exposure loop runner\n"
+            "    while (val > 0.0f) {\n"
+            "        pCtrl->SetTargetValue(val);\n"
+            "        break;\n"
+            "    }\n"
+            "}\n"
+        ))
+        self._write_file("Hw/Controller.h", (
+            "class CController {\n"
+            "public:\n"
+            "    void SetTargetValue(float v);\n"
+            "};\n"
+        ))
+        self._write_file("Hw/Controller.cpp", (
+            '#include "Controller.h"\n'
+            "void CController::SetTargetValue(float v) {\n"
+            "    float clamped = v * 2.0f;\n"
+            "}\n"
+        ))
+
+        class EmptyPass1Mock(MockQwenService):
+            def generate_raw(self, system_prompt, user_prompt, temperature=0.0, max_tokens=256, timeout=45.0, stop=None):
+                if "keywords" in system_prompt and "Extract 5 to 12" in system_prompt:
+                    return json.dumps({"keywords": ["exposure", "RunAutoSequence"]})
+                if "missing_symbols" in system_prompt and "Runner.cpp" in user_prompt:
+                    return json.dumps({
+                        "relevant": [{"file": "App/Runner.cpp", "lines": [2, 8], "symbols": ["RunAutoSequence"], "reason": "caller"}],
+                        "missing_symbols": []
+                    })
+                if "Controller.cpp" in user_prompt:
+                    return json.dumps({
+                        "relevant": [{"file": "Hw/Controller.cpp", "lines": [2, 4], "symbols": ["CController::SetTargetValue"], "reason": "impl"}]
+                    })
+                # Simulate Pass 1 returning nothing
+                return json.dumps({"relevant": []})
+
+        qwen = EmptyPass1Mock()
+        agent = self._build_agent(qwen)
+        res = agent.run("Where does exposure loop hang?", budget_sec=120, deep=False)
+
+        self.assertTrue(res.success)
+        final_prompt = qwen.final_calls[0][1]
+        self.assertIn("Controller.cpp", final_prompt)
+        self.assertIn("SetTargetValue", final_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

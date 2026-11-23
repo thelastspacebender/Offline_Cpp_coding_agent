@@ -33,6 +33,15 @@ HEADER_EXTS = {".h", ".hpp", ".hxx", ".hh", ".inl"}
 SOURCE_EXTS = {".cpp", ".c", ".cc", ".cxx"}
 INCLUDE_RE = re.compile(r'#\s*include\s*[<"]([^">]+)[">]')
 CITATION_RE = re.compile(r'\[([A-Za-z0-9_.\-\\/]+\.(?:cpp|c|cc|cxx|h|hpp|hxx|hh|inl|cs|py)):(\d+)\]')
+CALL_TOKEN_RE = re.compile(r'(?:->|\.|\b)([A-Za-z_][A-Za-z0-9_]{2,})\s*\(')
+DIVIDER_LINE_RE = re.compile(r'^(?://\s*[-=_*~/]{4,}|/\*\s*[-=_*]{4,}.*\*/)$')
+CPP_CONTROL_WORDS = {
+    "if", "for", "while", "switch", "catch", "return", "sizeof", "typeof",
+    "alignof", "decltype", "static_cast", "dynamic_cast", "reinterpret_cast",
+    "const_cast", "defined", "printf", "sprintf", "fprintf", "snprintf",
+    "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
+    "strlen", "strcpy", "strcmp", "ASSERT", "TRACE", "VERIFY"
+}
 
 
 @dataclass
@@ -311,14 +320,52 @@ class ReducingAgent:
         encoding: str,
         max_lines: int = 320,
         overlap: int = 15,
-        max_chunks: Optional[int] = None
+        max_chunks: Optional[int] = None,
+        compact_headers: bool = False
     ) -> List[CodeChunk]:
         lines = self._read_file_lines(file_path, encoding)
         if not lines:
             return []
 
+        if compact_headers:
+            # Strip blank lines, include-guard boilerplate, and divider banners while keeping original 1-based line numbers
+            indexed_pairs: List[Tuple[int, str]] = []
+            for idx, raw_ln in enumerate(lines, 1):
+                st = raw_ln.strip()
+                if not st:
+                    continue
+                if st == "#pragma once" or DIVIDER_LINE_RE.match(st):
+                    continue
+                if st.startswith("#ifndef ") and st.endswith(("_H", "_H_", "_HPP", "_INCLUDED")):
+                    continue
+                indexed_pairs.append((idx, raw_ln))
+            if not indexed_pairs:
+                return []
+
+            chunks: List[CodeChunk] = []
+            pos = 0
+            step = max(50, max_lines - overlap)
+            while pos < len(indexed_pairs):
+                window = indexed_pairs[pos:pos + max_lines]
+                text = "\n".join(f"{ln}| {txt}" for ln, txt in window)
+                if text.strip():
+                    chunks.append(CodeChunk(
+                        file_path=file_path,
+                        display_path=display_path,
+                        line_start=window[0][0],
+                        line_end=window[-1][0],
+                        text=text,
+                        is_outline=False
+                    ))
+                if pos + max_lines >= len(indexed_pairs):
+                    break
+                if max_chunks is not None and len(chunks) >= max_chunks:
+                    break
+                pos += step
+            return chunks
+
         total = len(lines)
-        chunks: List[CodeChunk] = []
+        chunks = []
         start = 1
         step = max(50, max_lines - overlap)
 
@@ -461,7 +508,38 @@ class ReducingAgent:
                 return full
         return None
 
-    def _pass0_extract_keywords(self, question: str, timeout: float = 15.0) -> List[str]:
+    def _extract_called_identifiers(self, evidences: List[EvidenceItem], file_encodings: Dict[str, str]) -> Set[str]:
+        """Extracts called C/C++ method/function identifiers from retrieved evidence line ranges."""
+        called: Set[str] = set()
+        for ev in evidences:
+            enc = file_encodings.get(ev.file_path, "utf-8")
+            lines = self._read_file_lines(ev.file_path, enc)
+            if not lines:
+                continue
+            ls = max(1, min(ev.line_start, len(lines)))
+            le = min(len(lines), max(ls, ev.line_end))
+            snippet = "\n".join(lines[ls - 1:le])
+            for m in CALL_TOKEN_RE.finditer(snippet):
+                tok = m.group(1)
+                if tok not in CPP_CONTROL_WORDS and len(tok) >= 3:
+                    called.add(tok)
+        return called
+
+    def _find_symbol_boost_files(self, keywords: List[str]) -> Set[str]:
+        """Finds file_paths containing indexed symbols matching keywords (used only for queue ordering & fallback seeding)."""
+        matched: Set[str] = set()
+        clean_kws = [k.strip() for k in keywords if re.match(r'^[A-Za-z0-9_]{3,}$', k.strip())]
+        if not clean_kws:
+            return matched
+        with self.db.get_connection() as conn:
+            cur = conn.cursor()
+            for kw in clean_kws[:12]:
+                cur.execute("SELECT DISTINCT file_path FROM symbols WHERE name LIKE ? LIMIT 15;", (f"%{kw}%",))
+                for row in cur.fetchall():
+                    matched.add(row[0])
+        return matched
+
+    def _pass0_extract_keywords(self, question: str, timeout: float = 20.0) -> List[str]:
         """Fast (~2-4s) keyword expansion used ONLY to order Pass 1 queue priority."""
         sys_p = (
             "Extract 5 to 12 concise technical search keywords (C/C++ identifier fragments, domain nouns, "
@@ -639,9 +717,9 @@ class ReducingAgent:
                     cur.execute("""
                         SELECT DISTINCT file_path
                         FROM symbols
-                        WHERE name = ? OR parent_scope = ? OR name LIKE ?
+                        WHERE name = ? OR parent_scope = ? OR name LIKE ? OR name LIKE ?
                         LIMIT 10;
-                    """, (sym, sym, f"{sym}::%"))
+                    """, (sym, sym, f"{sym}::%", f"%::{sym}"))
                     for row in cur.fetchall():
                         add_score(row[0], 5)
 
@@ -710,9 +788,9 @@ class ReducingAgent:
                 cur.execute("""
                     SELECT DISTINCT file_path
                     FROM symbols
-                    WHERE name = ? OR name = ? OR parent_scope = ? OR name LIKE ?
+                    WHERE name = ? OR name = ? OR parent_scope = ? OR name LIKE ? OR name LIKE ?
                     LIMIT 8;
-                """, (sym, short_sym, short_sym, f"{short_sym}::%"))
+                """, (sym, short_sym, short_sym, f"{short_sym}::%", f"%::{short_sym}"))
                 for row in cur.fetchall():
                     fp = row[0]
                     if fp not in scanned_pass2_files and fp not in already_rescued and fp in file_by_path:
@@ -889,7 +967,7 @@ class ReducingAgent:
                 )
                 usr_p = f"QUESTION:\n{question}\n\nEVIDENCE BATCH:\n{batch_text}\n\nJSON:"
                 raw = self.qwen.generate_raw(
-                    sys_p, usr_p, temperature=0.0, max_tokens=750, timeout=budget.batch_timeout(45.0)
+                    sys_p, usr_p, temperature=0.0, max_tokens=750, timeout=budget.batch_timeout(90.0)
                 )
                 budget.record_batch(time.time() - t_b0)
                 parsed = _parse_llm_json(raw)
@@ -999,8 +1077,9 @@ class ReducingAgent:
             )
 
         n_ctx = self.qwen.get_context_size()
-        batch_char_budget = max(8000, int(n_ctx * 0.60 * 3.0))
-        final_char_budget = max(10000, int((n_ctx - 2800) * 2.8))
+        # Keep triage batches compact (~3k tokens) so Vulkan iGPU evaluates each batch fast without timeouts
+        batch_char_budget = min(10500, max(6000, int(n_ctx * 0.45 * 2.5)))
+        final_char_budget = max(10000, int((n_ctx - 2800) * 2.6))
 
         log_agent_line(
             f"[{time.strftime('%H:%M:%S')}] 🧠 [Reducing {mode_tag}] n_ctx={n_ctx} | "
@@ -1019,9 +1098,11 @@ class ReducingAgent:
 
         # ---------------- PASS 0: Priority Ordering Only ----------------
         log_agent_line(f"[{time.strftime('%H:%M:%S')}] ⏳ [Pass 0] Извлечение ключевых терминов вопроса через LLM...")
-        keywords = self._pass0_extract_keywords(question, timeout=budget.batch_timeout(15.0))
-        bm25_boost_files = {m["file_path"] for m in self.fts.search_bm25(question, limit=15, custom_tokens=keywords or None)}
-        log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова для порядка очереди: {keywords[:10]}")
+        keywords = self._pass0_extract_keywords(question, timeout=budget.batch_timeout(20.0))
+        bm25_hits = self.fts.search_bm25(question, limit=25, custom_tokens=keywords or None)
+        bm25_boost_files = {m["file_path"] for m in bm25_hits}
+        sym_boost_files = self._find_symbol_boost_files(keywords)
+        log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔑 [Pass 0] Ключевые слова для порядка очереди: {keywords[:12]}")
 
         # ---------------- PASS 1: All Headers + Standalone Outlines ----------------
         header_records = [f for f in all_files if os.path.splitext(f["file_path"])[1].lower() in HEADER_EXTS]
@@ -1052,6 +1133,8 @@ class ReducingAgent:
             if current_file and (fp == current_file or (cur_stem and stem == cur_stem)):
                 return (0, fp)
             score = 0
+            if fp in sym_boost_files:
+                score += 6
             if fp in bm25_boost_files:
                 score += 5
             if any(kw in base for kw in kw_lowers):
@@ -1067,9 +1150,10 @@ class ReducingAgent:
         max_chunks_p1 = None if deep else 6
         for rec in pass1_targets:
             fp = rec["file_path"]
+            is_hdr = os.path.splitext(fp)[1].lower() in HEADER_EXTS
             pass1_chunks.extend(self._chunk_file(
                 fp, self._make_display_path(fp), rec["encoding"],
-                max_lines=320, overlap=15, max_chunks=max_chunks_p1
+                max_lines=320, overlap=15, max_chunks=max_chunks_p1, compact_headers=is_hdr
             ))
 
         if use_outlines_for_sources:
@@ -1097,7 +1181,7 @@ class ReducingAgent:
             t0 = time.time()
             evs, _ = self._scan_batch_map(
                 batch, question, "pass1_headers", False,
-                budget.batch_timeout(45.0), display_to_full, base_to_fulls
+                budget.batch_timeout(90.0), display_to_full, base_to_fulls
             )
             dt = time.time() - t0
             budget.record_batch(dt)
@@ -1107,8 +1191,37 @@ class ReducingAgent:
                 f"[{time.strftime('%H:%M:%S')}]    ✓ [Pass 1 | {idx}/{len(pass1_batches)} | {dt:.1f}с] найдено блоков: {len(evs)}"
             )
 
+        # Ensure Pass 2 always has seeds even if Pass 1 hit time limit or returned few matches
+        pass2_seed_hits = list(pass1_evidences)
+        if len(pass2_seed_hits) < 2:
+            log_agent_line(f"[{time.strftime('%H:%M:%S')}] 🔎 [Pass 1->2 Seed] Дополнение кандидатов из BM25 и таблицы символов...")
+            for sn in bm25_hits[:10]:
+                fp = sn["file_path"]
+                pass2_seed_hits.append(EvidenceItem(
+                    file_path=fp,
+                    display_path=self._make_display_path(fp),
+                    line_start=int(sn["line_start"]),
+                    line_end=int(sn["line_end"]),
+                    symbols=[sn["symbol_name"]] if sn.get("symbol_name") else [],
+                    reason="BM25 Pass 2 seed",
+                    source_pass="bm25_seed",
+                    score=1
+                ))
+            fuzzy_defs, _ = self.graph.fuzzy_search(keywords[:10], limit=8)
+            for fd in fuzzy_defs:
+                pass2_seed_hits.append(EvidenceItem(
+                    file_path=fd.file_path,
+                    display_path=self._make_display_path(fd.file_path),
+                    line_start=fd.line_start,
+                    line_end=fd.line_end,
+                    symbols=[fd.name],
+                    reason="Symbol Pass 2 seed",
+                    source_pass="symbol_seed",
+                    score=1
+                ))
+
         # ---------------- PASS 2: Map Headers -> .cpp/.c ----------------
-        pass2_targets = self._map_headers_to_sources(pass1_evidences, all_files, current_file, deep=deep)
+        pass2_targets = self._map_headers_to_sources(pass2_seed_hits, all_files, current_file, deep=deep)
         pass2_chunks: List[CodeChunk] = []
         max_chunks_p2 = None if deep else 6
         scanned_pass2_files: Set[str] = set()
@@ -1139,7 +1252,7 @@ class ReducingAgent:
             t0 = time.time()
             evs, miss = self._scan_batch_map(
                 batch, question, "pass2_cpp", True,
-                budget.batch_timeout(45.0), display_to_full, base_to_fulls
+                budget.batch_timeout(90.0), display_to_full, base_to_fulls
             )
             dt = time.time() - t0
             budget.record_batch(dt)
@@ -1154,6 +1267,10 @@ class ReducingAgent:
         found_symbols: Set[str] = set()
         for ev in pass1_evidences + pass2_evidences:
             found_symbols.update(ev.symbols)
+
+        # Automatically extract called method/function names (e.g. SetExpTime) from retrieved code blocks
+        called_in_evidence = self._extract_called_identifiers(pass2_evidences or pass2_seed_hits, file_encodings)
+        missing_symbols.update(called_in_evidence)
 
         already_rescued: Set[str] = set()
         rescue_targets = self._find_rescue_targets(
@@ -1189,7 +1306,7 @@ class ReducingAgent:
                 t0 = time.time()
                 evs, miss = self._scan_batch_map(
                     batch, question, "pass3_rescue", deep,
-                    budget.batch_timeout(45.0), display_to_full, base_to_fulls
+                    budget.batch_timeout(90.0), display_to_full, base_to_fulls
                 )
                 dt = time.time() - t0
                 budget.record_batch(dt)
@@ -1224,7 +1341,7 @@ class ReducingAgent:
                         t0 = time.time()
                         evs, _ = self._scan_batch_map(
                             batch, question, "pass3_rescue", False,
-                            budget.batch_timeout(45.0), display_to_full, base_to_fulls
+                            budget.batch_timeout(90.0), display_to_full, base_to_fulls
                         )
                         dt = time.time() - t0
                         budget.record_batch(dt)
