@@ -353,6 +353,19 @@ class TestSemanticMapAndFunnel(unittest.TestCase):
         res_reduce = svc.query("What does CAlpha::Run do?", mode="reduce", language="en")
         self.assertIn("Reducing:", res_reduce.answer)
 
+    def test_grep_mode_returns_over_20_deduped_matches(self):
+        # Write 35 separate files containing a shared token so FTS5 has >20 unique matches
+        for idx in range(35):
+            self._write(f"Mod{idx:02d}.cpp", f"void Func{idx}() {{ int MODE_MARKER_{idx} = 1; }}\n")
+        db = DatabaseManager(self.db_path)
+        IndexingService(db).index_directory(self.src_dir)
+        svc = SearchService(db, MockFunnelQwen())
+
+        res = svc.query("MODE_MARKER", mode="grep")
+        self.assertGreaterEqual(len(res.citations), 35)
+        locs = [(c.file, c.line) for c in res.citations]
+        self.assertEqual(len(locs), len(set(locs)), "Duplicate (file, line) FTS5 hits should be deduplicated")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -240,13 +240,13 @@ class SearchService:
 
     def _handle_callers_mode(self, symbol_name: str) -> SearchResult:
         clean_name = symbol_name.strip(" ();\n\r\t")
-        callers = self.graph.get_callers(clean_name, limit=50)
+        callers = self.graph.get_callers(clean_name, limit=200)
 
         if not callers:
             fuzzy_defs, _ = self.graph.fuzzy_search([clean_name], limit=3)
             if fuzzy_defs:
                 clean_name = fuzzy_defs[0].name
-                callers = self.graph.get_callers(clean_name, limit=50)
+                callers = self.graph.get_callers(clean_name, limit=200)
 
         if not callers:
             return SearchResult(
@@ -315,7 +315,17 @@ class SearchService:
         )
 
     def _handle_grep_mode(self, query_text: str) -> SearchResult:
-        matches = self.fts.search_bm25(query_text, limit=20)
+        raw_matches = self.fts.search_bm25(query_text, limit=500)
+        # Deduplicate hits where both symbol + code_chunk indexed the exact same file & line
+        matches: List[Dict[str, Any]] = []
+        seen_loc: Set[Tuple[str, int]] = set()
+        for m in raw_matches:
+            loc = (m["file_path"], int(m["line_start"]))
+            if loc in seen_loc:
+                continue
+            seen_loc.add(loc)
+            matches.append(m)
+
         if not matches:
             return SearchResult(
                 answer=f"По запросу '{query_text}' совпадений в коде не найдено.",
@@ -323,7 +333,8 @@ class SearchService:
             )
 
         citations: List[CodeCitation] = []
-        answer_lines = [f"🔎 Найдено {len(matches)} совпадений по коду (FTS5 BM25):\n"]
+        limit_note = " (достигнут потолок 500)" if len(raw_matches) >= 500 else ""
+        answer_lines = [f"🔎 Найдено {len(matches)} совпадений по коду (FTS5 BM25){limit_note}:\n"]
 
         for idx, m in enumerate(matches, 1):
             citations.append(CodeCitation(
